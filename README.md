@@ -78,7 +78,7 @@ Gold-standard benchmark datasets are provided in the [veritas_data repository](h
 # Clone the repository
 git clone https://github.com/WallauBioinfo/veritas.git
 cd veritas
-micromamba env create -f environment.yml # or conda another environment manager
+micromamba env create -f env.yaml # or conda another environment manager
 micromamba activate veritas
 veritas --help
 ```
