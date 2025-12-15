@@ -11,7 +11,6 @@ tests/
 ├── test_datasets.py      # Tests for dataset management
 ├── test_commands.py      # Tests for CLI commands
 ├── test_metrics.py       # Tests for metrics calculation
-├── fixtures/             # Test data files
 └── README.md            # This file
 ```
 

@@ -18,14 +18,14 @@
 - [Command Options](#command-options)
 - [Output Files](#output-files)
 - [Example Workflows](#example-workflows)
-- [Running Tests](#running-tests)
-- [Best Practices and Tips](#best-practices-and-tips)
-- [Development](#development)
-- [Troubleshooting](#troubleshooting)
+- [Development Information](#development-information)
+  - [Project Structure](#project-structure)
+  - [Formatting with black](#formatting-with-black)
+  - [Running Tests](#running-tests)
+- [Planned Functionalities](#planned-functionalities)
+- [Contributing](#contributing)
 - [Citation](#citation)
-- [License](#license)
-- [Author](#author)
-- [Acknowledgments](#acknowledgments)
+- [Authors](#authors)
 
 ## Disclaimer
 
@@ -424,7 +424,7 @@ veritas/
 └── README.md
 ```
 
-### Formating with black
+### Formatting with black
 
 Before commiting, please format the code with black.
 
@@ -462,36 +462,6 @@ tests/
 └── README.md            # Test documentation
 ```
 
-#### Test Categories
-
-The test suite is organized into:
-
-- **Unit Tests** (`test_validate.py`, `test_datasets.py`, `test_metrics.py`)
-  - Test individual functions in isolation
-  - Fast execution
-  - No external dependencies required
-
-- **Integration Tests** (`test_commands.py`)
-  - Test CLI commands end-to-end
-  - Verify argument validation
-  - Check command help output
-
-#### Running Specific Tests
-
-```bash
-# Run only unit tests
-pytest tests/test_validate.py tests/test_datasets.py tests/test_metrics.py -v
-
-# Run only integration tests
-pytest tests/test_commands.py -v
-
-# Run tests matching a pattern
-pytest tests/ -k "metrics" -v
-
-# Run with detailed output
-pytest tests/ -vv -s
-```
-
 #### Notes
 
 - Some tests create temporary files automatically cleaned up after execution
@@ -500,7 +470,13 @@ pytest tests/ -vv -s
 - See `tests/README.md` for detailed testing documentation
 - This suite of tests were generated using Gemini 3 Pro
 
-### Contributing
+## Planned Functionalities
+
+- Download datasets based on metadata, for example: all datasets for SARS-CoV-2, or all datasets generated using Illumina amplicon sequencing.
+-Support the analysis and validation of structural variants (SVs), which is particularly important in the context of Mpox data.
+-Generate genomic plots that highlight variants and their classifications (true positives, false positives, and false negatives).
+
+## Contributing
 
 Contributions are welcome! Please:
 
