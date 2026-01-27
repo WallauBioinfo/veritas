@@ -1,5 +1,6 @@
 import subprocess
 
+
 def run_rtg_format(reference, output):
     """
     Run RTG format to convert reference FASTA to SDF.
@@ -36,7 +37,7 @@ def run_gsalign(reference, query_fasta, output_prefix):
         "1",
         "-sen",
     ]
-    
+
     subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     vcf_file = f"{output_prefix}.vcf"
     alignment_file = f"{output_prefix}.maf"

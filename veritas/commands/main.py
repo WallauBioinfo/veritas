@@ -385,5 +385,6 @@ def rtg_format(reference, output):
         logger.error(f"Error running RTG format: {e}")
         raise click.Abort()
 
+
 if __name__ == "__main__":
     cli()

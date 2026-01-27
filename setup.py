@@ -5,7 +5,7 @@ setup(
     description="""
     Tool to get benchmark datasets and compare VCF files.
     """,
-    version="0.0.1",
+    version="0.0.2",
     authors="Filipe Dezordi",
     authors_emails="zimmer.filipe@gmail.com",
     classifiers=[

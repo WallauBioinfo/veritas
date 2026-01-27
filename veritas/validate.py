@@ -7,6 +7,7 @@ import pandas as pd
 import tempfile
 from veritas.logger import logger
 
+
 def fix_gsalign_vcf(input_vcf, output_vcf):
     """
     Fix GSAlign VCF issues before processing with pysam.
@@ -22,30 +23,27 @@ def fix_gsalign_vcf(input_vcf, output_vcf):
         for line in fin:
             if line.startswith("##"):
                 fout.write(line)
-                # Add FILTER definition before the first #CHROM line
                 if not header_done and line.startswith("##contig"):
                     fout.write(
                         '##FILTER=<ID=*,Description="All filters passed or filter information not available">\n'
                     )
                     header_done = True
             elif line.startswith("#CHROM"):
-                # Make sure FILTER is defined before column headers
                 if not header_done:
                     fout.write(
                         '##FILTER=<ID=*,Description="All filters passed or filter information not available">\n'
                     )
                 fout.write(line)
             else:
-                # Remove INFO/END field from data lines
                 parts = line.strip().split("\t")
                 if len(parts) >= 8:
                     info_field = parts[7]
-                    # Remove END= from INFO field
                     info_parts = [
                         p for p in info_field.split(";") if not p.startswith("END=")
                     ]
                     parts[7] = ";".join(info_parts) if info_parts else "."
                 fout.write("\t".join(parts) + "\n")
+
 
 def process_gsalign_vcf(gsalign_vcf, sample_name, output_vcf):
     """
@@ -60,46 +58,89 @@ def process_gsalign_vcf(gsalign_vcf, sample_name, output_vcf):
         Path to the processed VCF file
     """
 
-    # Process VCF as text to avoid pysam END calculation warnings
     with open(gsalign_vcf, "r") as fin, open(output_vcf, "w") as fout:
         for line in fin:
             if line.startswith("##"):
-                # Write header lines
                 fout.write(line)
-                # Add FILTER and FORMAT definitions after contig
                 if line.startswith("##contig"):
                     fout.write('##FILTER=<ID=PASS,Description="All filters passed">\n')
                     fout.write(
                         '##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">\n'
                     )
             elif line.startswith("#CHROM"):
-                # Modify column header to add FORMAT and sample
                 parts = line.strip().split("\t")
-                # Remove existing columns after INFO (if any)
                 parts = parts[:8]
-                # Add FORMAT and sample columns
                 parts.extend(["FORMAT", sample_name])
                 fout.write("\t".join(parts) + "\n")
             else:
-                # Process variant lines
                 parts = line.strip().split("\t")
                 if len(parts) >= 8:
-                    # Change FILTER from * to PASS
                     parts[6] = "PASS"
-                    # Remove INFO fields to avoid any END issues
                     parts[7] = "."
-                    # Add FORMAT (GT) and sample genotype (1)
                     parts.extend(["GT", "1"])
                     fout.write("\t".join(parts) + "\n")
 
-    # Compress and index the output VCF
     pysam.tabix_compress(output_vcf, output_vcf + ".gz", force=True)
     pysam.tabix_index(output_vcf + ".gz", preset="vcf", force=True)
 
-    # Remove uncompressed file
     os.remove(output_vcf)
 
     return output_vcf + ".gz"
+
+
+def merge_vcfs(tp_vcf, fp_vcf, fn_vcf, output_vcf):
+    tp = pysam.VariantFile(tp_vcf)
+    fp = pysam.VariantFile(fp_vcf)
+    fn = pysam.VariantFile(fn_vcf)
+
+    merged_header = pysam.VariantHeader()
+
+    for rec in tp.header.records:
+        if rec.type != "INFO":
+            merged_header.add_line(str(rec))
+
+    internal_fields = {
+        "TAG": '##INFO=<ID=TAG,Number=1,Type=String,Description="Variant class: TP, FP, FN">',
+        "TYPE": '##INFO=<ID=TYPE,Number=1,Type=String,Description="Variant type: SNV=Single Nucleotide Variant, INDEL=Insertion or Deletion">',
+        "BED": '##INFO=<ID=BED,Number=.,Type=String,Description="Variant in BED file: PRIMER=Bed with amplicon primer">',
+    }
+
+    for field_def in internal_fields.values():
+        merged_header.add_line(field_def)
+
+    for s in tp.header.samples:
+        merged_header.add_sample(s)
+
+    out = pysam.VariantFile(output_vcf, "w", header=merged_header)
+
+    def write_records(vcf, tag):
+        for record in vcf:
+            new_record = out.new_record()
+
+            new_record.chrom = record.chrom
+            new_record.pos = record.pos
+            new_record.id = record.id
+            new_record.ref = record.ref
+            new_record.alts = record.alts
+            new_record.qual = record.qual
+            new_record.filter.clear()
+            for filter_name in record.filter:
+                new_record.filter.add(filter_name)
+
+            new_record.info["TAG"] = tag
+
+            if "TYPE" in record.info:
+                new_record.info["TYPE"] = record.info["TYPE"]
+            if "BED" in record.info:
+                new_record.info["BED"] = record.info["BED"]
+
+            out.write(new_record)
+
+    write_records(tp, "TP")
+    write_records(fp, "FP")
+    write_records(fn, "FN")
+
+    out.close()
 
 
 def compare(
@@ -154,43 +195,37 @@ def compare(
     ):
         try:
             with pysam.VariantFile(vcf_file) as template:
-                header = template.header.copy()
-            header.add_meta(
-                "INFO",
-                    items=[
-                        ("ID", "TAG"),
-                        ("Number", "1"),
-                        ("Type", "String"),
-                        (
-                            "Description",
-                            "Variant origin tag: TP=True Positive, FP=False Positive, FN=False Negative",
-                        ),
-                    ],
-                )
-            header.add_meta(
-                "INFO",
-                items=[
-                    ("ID", "TYPE"),
-                    ("Number", "1"),
-                    ("Type", "String"),
-                    (
-                        "Description",
-                        "Variant type: SNV=Single Nucleotide Variant, INDEL=Insertion or Deletion",
-                    ),
-                ],
+                original_header = template.header
+
+                header = pysam.VariantHeader()
+                for rec in original_header.records:
+                    if rec.type != "INFO":
+                        header.add_line(str(rec))
+
+                internal_fields = {"TAG", "TYPE", "BED"}
+                for rec in original_header.records:
+                    if rec.type == "INFO":
+                        info_id = rec["ID"]
+                        if info_id not in internal_fields:
+                            desc = rec["Description"]
+                            if not desc.startswith('"'):
+                                desc = f'"{desc}"'
+                            info_line = f'##INFO=<ID={info_id},Number=.,Type={rec["Type"]},Description={desc}>'
+                            header.add_line(info_line)
+
+                for sample in original_header.samples:
+                    header.add_sample(sample)
+
+            header.add_line(
+                '##INFO=<ID=TAG,Number=1,Type=String,Description="Variant origin tag: TP=True Positive, FP=False Positive, FN=False Negative">'
             )
-            header.add_meta(
-                "INFO",
-                items=[
-                    ("ID", "BED"),
-                    ("Number", "1"),
-                    ("Type", "String"),
-                    (
-                        "Description",
-                        "Variant in BED file: PRIMER=Bed with amplicon primer",
-                    ),
-                ],
+            header.add_line(
+                '##INFO=<ID=TYPE,Number=1,Type=String,Description="Variant type: SNV=Single Nucleotide Variant, INDEL=Insertion or Deletion">'
             )
+            header.add_line(
+                '##INFO=<ID=BED,Number=.,Type=String,Description="Variant in BED file: PRIMER=Bed with amplicon primer">'
+            )
+
             with pysam.VariantFile(vcf_output, "w", header=header) as out_vcf:
                 with pysam.VariantFile(vcf_file) as vcf:
                     for record in vcf:
@@ -205,123 +240,36 @@ def compare(
                         for f in record.filter:
                             new_record.filter.add(f)
                         for key, value in record.info.items():
-                            if key != "TAG" or key != "TYPE" or key != "BED":
+                            if key != "TAG" and key != "TYPE" and key != "BED":
                                 new_record.info[key] = value
                         new_record.info["TAG"] = origin_tag
                         variant_type = (
-                            "SNV"
-                            if len(record.ref) == len(record.alts[0])
-                            else "INDEL"
+                            "SNV" if len(record.ref) == len(record.alts[0]) else "INDEL"
                         )
                         new_record.info["TYPE"] = variant_type
-                        if primerd_bed and in_intervals(
-                            record.pos, primerd_bed
-                        ):
-                            new_record.info["BED"] = "PRIMER"
+                        bed_regions = []
+                        if primerd_bed and in_intervals(record.pos, primerd_bed):
+                            bed_regions.append("PRIMER")
                         if mask_bed and in_intervals(record.pos, mask_bed):
-                            if not new_record.info.get("BED"):
-                                new_record.info["BED"] = "MASK"
-                            else:
-                                new_record.info["BED"] += ",MASK"
+                            bed_regions.append("MASK")
                         if low_cov_truth_bed and in_intervals(
                             record.pos, low_cov_truth_bed
                         ):
-                            if not new_record.info.get("BED"):
-                                new_record.info["BED"] = "LOW_COV_TRUTH"
-                            else:
-                                new_record.info["BED"] += ",LOW_COV_TRUTH"
+                            bed_regions.append("LOW_COV_TRUTH")
                         if low_cov_query_bed and in_intervals(
                             record.pos, low_cov_query_bed
                         ):
-                            if not new_record.info.get("BED"):
-                                new_record.info["BED"] = "LOW_COV_QUERY"
-                            else:
-                                new_record.info["BED"] += ",LOW_COV_QUERY"
+                            bed_regions.append("LOW_COV_QUERY")
+
+                        if bed_regions:
+                            new_record.info["BED"] = bed_regions
+                        else:
+                            new_record.info["BED"] = ["."]
                         out_vcf.write(new_record)
             pysam.tabix_index(vcf_output, preset="vcf", force=True)
         except Exception as e:
             logger.error(f"Error processing {vcf_file}: {e}")
             sys.exit(1)
-
-    def merge_vcfs(tp_vcf, fp_vcf, fn_vcf, output_vcf):
-        tp = pysam.VariantFile(tp_vcf)
-        fp = pysam.VariantFile(fp_vcf)
-        fn = pysam.VariantFile(fn_vcf)
-
-        # Começa do header do TP
-        merged_header = tp.header.copy()
-
-        # Cria TAG identificador
-        if "TAG" not in merged_header.info:
-            merged_header.info.add("TAG", 1, "String", "Variant class: TP, FP, FN")
-
-        # Função para copiar definições de INFO
-        def add_missing_info(source_header):
-            for key, info in source_header.info.items():
-                if key not in merged_header.info and key != "END":
-                    merged_header.info.add(
-                        key, info.number, info.type, info.description
-                    )
-
-        # Unifica os headers dos outros arquivos
-        add_missing_info(fp.header)
-        add_missing_info(fn.header)
-
-        out = pysam.VariantFile(output_vcf, "w", header=merged_header)
-
-        # Lista final de chaves INFO (excluindo TAG e END)
-        info_keys = [
-            key for key in merged_header.info.keys() if key not in ["TAG", "END"]
-        ]
-
-        def write_records(vcf, tag):
-            for record in vcf:
-                # Create a new record with the merged header
-                new_record = out.new_record()
-
-                # Copy basic fields
-                new_record.chrom = record.chrom
-                new_record.pos = record.pos
-                new_record.id = record.id
-                new_record.ref = record.ref
-                new_record.alts = record.alts
-                new_record.qual = record.qual
-                new_record.filter.clear()
-                for filter_name in record.filter:
-                    new_record.filter.add(filter_name)
-
-                # Set the TAG
-                new_record.info["TAG"] = tag
-
-                # Copy existing INFO fields from the original record
-                for key in record.info:
-                    if key in info_keys and key != "END":
-                        new_record.info[key] = record.info[key]
-
-                # Set missing INFO fields to dot (.)
-                for key in info_keys:
-                    if key not in new_record.info:
-                        # For missing fields, we need to handle them based on their type
-                        if key in merged_header.info:
-                            info_field = merged_header.info[key]
-                            if info_field.number == 1 and info_field.type == "String":
-                                new_record.info[key] = "."
-                            elif (
-                                info_field.number == 1 and info_field.type == "Integer"
-                            ):
-                                new_record.info[key] = -1  # or use None if you prefer
-                            elif info_field.number == 1 and info_field.type == "Float":
-                                new_record.info[key] = float("nan")
-                            else:
-                                new_record.info[key] = "."
-
-                out.write(new_record)
-
-        write_records(tp, "TP")
-        write_records(fp, "FP")
-        write_records(fn, "FN")
-
-        out.close()
 
     process_vcf_file(
         f"{rtg_dir}/tp.vcf.gz",
@@ -360,7 +308,6 @@ def compare(
         output_vcf=f"{rtg_dir}/tmp_merged.vcf.gz",
     )
 
-    # Sort the merged VCF before indexing (merge writes in TP/FP/FN order, not position order)
     logger.info("Sorting merged VCF...")
     subprocess.run(
         [
@@ -377,10 +324,8 @@ def compare(
         stderr=subprocess.DEVNULL,
     )
 
-    # Index the final sorted VCF
     pysam.tabix_index(f"{output_dir}/truth_query.vcf.gz", preset="vcf", force=True)
 
-    # Clean up temporary files
     os.remove(f"{rtg_dir}/tmp_tp.vcf.gz")
     os.remove(f"{rtg_dir}/tmp_tp.vcf.gz.tbi")
     os.remove(f"{rtg_dir}/tmp_fp.vcf.gz")
@@ -469,13 +414,10 @@ def calc_metrics(
     Returns:
         Dictionary containing metrics for 'all' and specific BED regions
     """
-    # Contagem completa (sem filtros)
     counts_all = {
         "SNV": {"TP": 0, "FP": 0, "FN": 0},
         "INDEL": {"TP": 0, "FP": 0, "FN": 0},
     }
-
-    # Contagem ignorando regiões BED
     counts_primer = {
         "SNV": {"TP": 0, "FP": 0, "FN": 0},
         "INDEL": {"TP": 0, "FP": 0, "FN": 0},
@@ -498,14 +440,16 @@ def calc_metrics(
             if tag not in ("TP", "FP", "FN"):
                 continue
 
-            var_type = record.info.get("TYPE", "INDEL")  # default to INDEL se faltando
+            var_type = record.info.get("TYPE", "INDEL")
             bed_field = record.info.get("BED", "")
+
+            if isinstance(bed_field, (tuple, list)):
+                bed_field = ",".join(bed_field)
+
             bed_values = set(bed_field.split(",")) if bed_field else set()
 
-            # 1) Sempre contar na métrica completa
             counts_all[var_type][tag] += 1
 
-            # 2) Contagens beds específicas
             if "PRIMER" in bed_values:
                 counts_primer[var_type][tag] += 1
             if "MASK" in bed_values:
@@ -515,7 +459,6 @@ def calc_metrics(
             if "LOW_COV_QUERY" in bed_values:
                 counts_low_cov_query[var_type][tag] += 1
 
-    # Monta resultados
     def build_results(counts):
         res = {}
         for var_type, vals in counts.items():
@@ -548,7 +491,6 @@ def save_metrics_tsv(metrics_dict, output_file):
 
     rows = []
 
-    # Parte ALL
     for var_type, data in metrics_dict["all"].items():
         rows.append({"Category": f"{var_type}", "Region": "ALL", **data})
 
