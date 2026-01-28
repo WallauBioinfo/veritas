@@ -473,8 +473,8 @@ tests/
 ## Planned Functionalities
 
 - Download datasets based on metadata, for example: all datasets for SARS-CoV-2, or all datasets generated using Illumina amplicon sequencing.
--Support the analysis and validation of structural variants (SVs), which is particularly important in the context of Mpox data.
--Generate genomic plots that highlight variants and their classifications (true positives, false positives, and false negatives).
+- Support the analysis and validation of structural variants (SVs), which is particularly important in the context of Mpox data.
+- Generate genomic plots that highlight variants and their classifications (true positives, false positives, and false negatives).
 
 ## Contributing
 
