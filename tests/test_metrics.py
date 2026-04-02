@@ -33,9 +33,6 @@ def _write_annotated_vcf(path, records):
                 f"NC_045512.2\t{r['pos']}\t.\t{r['ref']}\t{r['alt']}\t100\tPASS\t{info}\tGT\t1\n"
             )
 
-    # Use system bgzip + tabix (htslib tools) instead of pysam.tabix_compress /
-    # pysam.tabix_index: the latter produces BGZF blocks that htslib 1.22 on
-    # Linux refuses to iterate, triggering "Firing event 10 with no exception set".
     vcf_gz = path + ".gz"
     subprocess.run(["bgzip", "-f", path], check=True)
     subprocess.run(["tabix", "-p", "vcf", vcf_gz], check=True)
