@@ -1,7 +1,3 @@
-"""
-Pytest configuration and fixtures for Veritas tests.
-"""
-
 import pytest
 import tempfile
 import os
@@ -52,7 +48,6 @@ def sample_truth_vcf(temp_dir):
         f.write("#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tMySample\n")
         f.write("NC_045512.2\t70\t.\tA\tG\t100\tPASS\t.\tGT\t1\n")
 
-    # Compress and index
     vcf_gz = vcf_path + ".gz"
     pysam.tabix_compress(vcf_path, vcf_gz, force=True)
     pysam.tabix_index(vcf_gz, preset="vcf", force=True)
@@ -69,12 +64,9 @@ def sample_query_vcf(temp_dir):
         f.write("##contig=<ID=NC_045512.2,length=71>\n")
         f.write('##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">\n')
         f.write("#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tMySample\n")
-        # TP: Same as truth
-        f.write("NC_045512.2\t70\t.\tA\tG\t100\tPASS\t.\tGT\t1\n")
-        # FP: Not in truth
         f.write("NC_045512.2\t50\t.\tC\tT\t100\tPASS\t.\tGT\t1\n")
+        f.write("NC_045512.2\t70\t.\tA\tG\t100\tPASS\t.\tGT\t1\n")
 
-    # Compress and index
     vcf_gz = vcf_path + ".gz"
     pysam.tabix_compress(vcf_path, vcf_gz, force=True)
     pysam.tabix_index(vcf_gz, preset="vcf", force=True)
@@ -87,7 +79,6 @@ def sample_primer_bed(temp_dir):
     """Create a BED file with primer regions."""
     bed_path = os.path.join(temp_dir, "primers.bed")
     with open(bed_path, "w") as f:
-        # Primer covers position 45-55
         f.write("NC_045512.2\t45\t55\tprimer1\n")
     return bed_path
 
@@ -97,7 +88,6 @@ def sample_mask_bed(temp_dir):
     """Create a BED file with mask regions."""
     bed_path = os.path.join(temp_dir, "mask.bed")
     with open(bed_path, "w") as f:
-        # Mask region
         f.write("NC_045512.2\t60\t65\tmask_region\n")
     return bed_path
 
