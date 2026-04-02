@@ -33,9 +33,7 @@ class TestCalcMetrics:
     """Tests for calc_metrics()."""
 
     def test_perfect_snv_match(self):
-        result = _run_calc_metrics(
-            [_mock_record(70, "A", "G", "TP", "SNV", ["."])]
-        )
+        result = _run_calc_metrics([_mock_record(70, "A", "G", "TP", "SNV", ["."])])
         snv = result["all"]["SNV"]
         assert snv["TP"] == 1
         assert snv["FP"] == 0
@@ -111,9 +109,7 @@ class TestCalcMetrics:
         assert result["counts_low_cov_truth"]["SNV"]["FN"] == 1
 
     def test_result_has_expected_keys(self):
-        result = _run_calc_metrics(
-            [_mock_record(70, "A", "G", "TP", "SNV", ["."])]
-        )
+        result = _run_calc_metrics([_mock_record(70, "A", "G", "TP", "SNV", ["."])])
         assert "all" in result
         assert "counts_primer" in result
         assert "counts_mask" in result
