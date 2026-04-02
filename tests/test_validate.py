@@ -198,9 +198,7 @@ class TestProcessGsalignVcf:
         self._write_gsalign_vcf(raw_vcf)
         result = process_gsalign_vcf(raw_vcf, "MySample", out_vcf)
         with gzip.open(result, "rt") as fh:
-            data_lines = [
-                l for l in fh if not l.startswith("#") and l.strip()
-            ]
+            data_lines = [l for l in fh if not l.startswith("#") and l.strip()]
         for line in data_lines:
             fields = line.strip().split("\t")
             assert fields[6] == "PASS"
