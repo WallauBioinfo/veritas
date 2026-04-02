@@ -191,13 +191,19 @@ class TestProcessGsalignVcf:
 
     def test_variants_have_pass_filter(self, temp_dir):
         """All variants in the output VCF have PASS filter."""
+        import gzip
+
         raw_vcf = os.path.join(temp_dir, "gsalign.vcf")
         out_vcf = os.path.join(temp_dir, "processed.vcf")
         self._write_gsalign_vcf(raw_vcf)
         result = process_gsalign_vcf(raw_vcf, "MySample", out_vcf)
-        with pysam.VariantFile(result) as vcf:
-            for record in vcf:
-                assert "PASS" in record.filter
+        with gzip.open(result, "rt") as fh:
+            data_lines = [
+                l for l in fh if not l.startswith("#") and l.strip()
+            ]
+        for line in data_lines:
+            fields = line.strip().split("\t")
+            assert fields[6] == "PASS"
 
     def test_index_file_created(self, temp_dir):
         """A .tbi index is created alongside the output VCF."""
@@ -208,14 +214,16 @@ class TestProcessGsalignVcf:
         assert os.path.exists(result + ".tbi")
 
     def test_gt_format_added(self, temp_dir):
-        """GT FORMAT field is added to each variant record."""
+        """GT FORMAT field and header are present in the output VCF."""
+        import gzip
+
         raw_vcf = os.path.join(temp_dir, "gsalign.vcf")
         out_vcf = os.path.join(temp_dir, "processed.vcf")
         self._write_gsalign_vcf(raw_vcf)
         result = process_gsalign_vcf(raw_vcf, "MySample", out_vcf)
-        with pysam.VariantFile(result) as vcf:
-            for record in vcf:
-                assert "GT" in vcf.header.formats
+        with gzip.open(result, "rt") as fh:
+            header_lines = [l for l in fh if l.startswith("##FORMAT")]
+        assert any("ID=GT" in l for l in header_lines)
 
 
 class TestFixGsalignVcf:

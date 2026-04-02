@@ -20,6 +20,7 @@ def _write_annotated_vcf(path, records):
     with open(path, "w") as f:
         f.write("##fileformat=VCFv4.2\n")
         f.write("##contig=<ID=NC_045512.2,length=300>\n")
+        f.write('##FILTER=<ID=PASS,Description="All filters passed">\n')
         f.write('##INFO=<ID=TAG,Number=1,Type=String,Description="Variant class">\n')
         f.write('##INFO=<ID=TYPE,Number=1,Type=String,Description="Variant type">\n')
         f.write('##INFO=<ID=BED,Number=.,Type=String,Description="BED regions">\n')
