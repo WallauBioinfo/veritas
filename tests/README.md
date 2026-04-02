@@ -123,10 +123,11 @@ def test_command():
 
 ## Continuous Integration
 
-These tests are run automatically on:
-- Every pull request
-- Every push to main branch
-- On scheduled nightly builds
+Tests are run automatically via GitHub Actions (see [`.github/workflows/tests.yml`](../.github/workflows/tests.yml)) on:
+- Every push to `main`
+- Every pull request targeting `main`
+
+The workflow uses `micromamba` to recreate the full `env.yaml` environment (including `rtg-tools`, `gsalign`, and `bcftools`), so all tests — including those requiring external tools — run in CI.
 
 ## Troubleshooting
 
@@ -135,13 +136,6 @@ These tests are run automatically on:
 Make sure you have installed Veritas with all dependencies:
 ```bash
 pip install -e .
-```
-
-### Tests fail with "command not found"
-
-Some tests require external tools (RTG, GSAlign, etc.). These tests should be skipped if tools are not available:
-```bash
-pytest tests/ -v -k "not rtg and not gsalign"
 ```
 
 ### Temporary files not cleaned up

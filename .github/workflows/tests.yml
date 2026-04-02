@@ -1,0 +1,52 @@
+name: Tests
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  test:
+    name: pytest (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+
+    defaults:
+      run:
+        shell: bash -el {0}   # ensures conda env is activated in every step
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up micromamba
+        uses: mamba-org/setup-micromamba@v2
+        with:
+          environment-file: env.yaml
+          environment-name: veritas
+          cache-environment: true
+          cache-downloads: true
+
+      - name: Install veritas (editable)
+        run: pip install -e . --no-deps
+
+      - name: Run pytest
+        run: |
+          pytest tests/ -v \
+            --tb=short \
+            --cov=veritas \
+            --cov-report=term-missing \
+            --cov-report=xml:coverage.xml
+
+      - name: Upload coverage report
+        uses: codecov/codecov-action@v5
+        if: always()
+        with:
+          files: coverage.xml
+          fail_ci_if_error: false

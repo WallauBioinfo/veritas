@@ -17,6 +17,10 @@
   - [Format Reference for RTG Tools](#5-format-reference-for-rtg-tools)
 - [Command Options](#command-options)
 - [Output Files](#output-files)
+- [Metrics Calculation](#metrics-calculation)
+  - [Variant Classification](#variant-classification)
+  - [Formulas](#formulas)
+  - [BED Region Metrics](#bed-region-metrics)
 - [Example Workflows](#example-workflows)
 - [Development Information](#development-information)
   - [Project Structure](#project-structure)
@@ -218,7 +222,7 @@ When using `--query-fasta`, veritas will:
 
 ### 4. Convert FASTA to VCF
 
-The `convert` command allows you to convert a FASTA consensus sequence to VCF format using GSAlign, without running validation. It is useful when you want to create an artificial dataset based on a consensus genomes that differs from a reference.
+The `convert` command allows you to convert a FASTA consensus sequence to VCF format using GSAlign, without running validation. It is useful when you want to create an artificial dataset based on a consensus genome that differs from a reference.
 
 ```bash
 veritas convert \
@@ -250,6 +254,30 @@ veritas convert \
   -s MySample \
   -o results/my_sample.vcf.gz
 ```
+
+#### FASTA-to-VCF Conversion Pipeline
+
+When a FASTA consensus is provided (via `convert` or `validate --query-fasta`), Veritas performs the following steps:
+
+1. **Pairwise alignment**: [GSAlign](https://github.com/hsinnan75/GSAlign) aligns the consensus FASTA against the reference genome and produces a raw VCF.
+2. **Header normalisation**: Veritas patches the raw GSAlign VCF to add a standard `FILTER=<PASS>` definition and `FORMAT=<GT>` field, which are required by RTG Tools.
+3. **Sample column injection**: The sample name (taken from the truth VCF or provided via `--sample`) is written into the VCF column header and each record.
+4. **Compression & indexing**: The processed VCF is bgzipped and tabix-indexed, producing the final `.vcf.gz` file used in downstream validation.
+
+#### Treatment of N and gap characters
+
+> [!IMPORTANT]
+> Understanding how ambiguous bases and gaps are handled is essential when using a FASTA consensus as input instead of a VCF.
+
+| Character in consensus | How GSAlign treats it | Effect on metrics |
+|------------------------|----------------------|-------------------|
+| **Point substitution** (e.g., `A→G`) | Called as an SNV | Counted in TP/FP/FN for the **SNV** category |
+| **Insertion** (extra bases relative to reference) | Called as an INDEL | Counted in TP/FP/FN for the **INDEL** category |
+| **Deletion** (`-` in alignment) | Called as an INDEL | Counted in TP/FP/FN for the **INDEL** category |
+| **Ambiguous base `N`** | **Not called as a variant** | Positions masked as `N` are treated as missing data — they generate **no FP**, but any truth variant at that position becomes an **FN** |
+
+Because `N` positions are silently skipped rather than called as mismatches, a consensus with large masked regions can appear to have a low FP rate while quietly accumulating FNs. **For this reason, we strongly recommend using the original VCF from your workflow whenever possible** (see [Disclaimer](#disclaimer)).
+
 
 ### 5. Format Reference for RTG Tools
 
@@ -338,6 +366,49 @@ SNV         LOW_COV_TRUTH BED   3   2   1
 - **MASK BED**: Variants within masked regions (if `--mask-bed` provided)
 - **LOW_COV_TRUTH BED**: Variants in low coverage regions of truth (if `--low-cov-truth-bed` provided)
 - **LOW_COV_QUERY BED**: Variants in low coverage regions of query (if `--low-cov-query-bed` provided)
+
+## Metrics Calculation
+
+### Variant Classification
+
+Each variant in the merged output VCF is tagged using RTG vcfeval results:
+
+| Tag | Meaning |
+|-----|---------|
+| **TP** | True Positive — variant present in both truth and query |
+| **FP** | False Positive — variant present only in query |
+| **FN** | False Negative — variant present only in truth |
+
+Variants are independently classified as **SNV** or **INDEL**:
+- **SNV** (Single Nucleotide Variant): `len(REF) == len(ALT)` — simple substitutions
+- **INDEL** (Insertion or Deletion): `len(REF) != len(ALT)` — any length-changing variant
+
+SNV and INDEL metrics are always reported separately, so a pipeline that calls substitutions well but misses indels (or vice versa) is visible in the output.
+
+### Formulas
+
+For each variant category (SNV / INDEL) and region, Veritas computes:
+
+$$\text{Precision} = \frac{TP}{TP + FP}$$
+
+$$\text{Recall} = \frac{TP}{TP + FN}$$
+
+$$\text{F1-Score} = \frac{2 \times \text{Precision} \times \text{Recall}}{\text{Precision} + \text{Recall}}$$
+
+All three metrics return **0** whenever the denominator is zero (e.g., no variants in that category).
+
+### BED Region Metrics
+
+When BED files are provided, Veritas reports metrics both globally (`ALL`) and broken down by genomic context (primer regions, masked regions, low-coverage regions). A single variant can appear in multiple BED regions simultaneously. This allows you to:
+
+- Identify whether FPs are concentrated in amplicon primer regions (a common artefact)
+- Distinguish FNs in low-coverage areas from genuine pipeline failures
+- Assess whether masked regions are inflating performance by excluding difficult sites
+
+### N bases and gaps (FASTA input only)
+
+See [FASTA-to-VCF Conversion Pipeline](#fasta-to-vcf-conversion-pipeline) for a full table of how `N`, substitutions, insertions, and deletions are treated during conversion from a consensus FASTA to VCF before metric calculation.
+
 
 ## Example Workflows
 
