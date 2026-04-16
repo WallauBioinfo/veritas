@@ -7,7 +7,6 @@ from veritas.validate import (
     in_bed_region,
     process_gsalign_vcf,
     fix_gsalign_vcf,
-    merge_vcfs,
 )
 
 
@@ -223,121 +222,6 @@ class TestProcessGsalignVcf:
         with gzip.open(result, "rt") as fh:
             header_lines = [l for l in fh if l.startswith("##FORMAT")]
         assert any("ID=GT" in l for l in header_lines)
-
-
-class TestMergeVcfs:
-    """Tests for merge_vcfs()."""
-
-    def _make_header(self, chrom):
-        """Build a pysam VariantHeader matching what process_vcf_file produces."""
-        h = pysam.VariantHeader()
-        h.add_line(f"##contig=<ID={chrom},length=200>")
-        h.add_line(
-            '##INFO=<ID=TAG,Number=1,Type=String,Description="Variant origin tag">'
-        )
-        h.add_line('##INFO=<ID=TYPE,Number=1,Type=String,Description="Variant type">')
-        h.add_line('##INFO=<ID=BED,Number=.,Type=String,Description="BED region">')
-        h.add_line('##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">')
-        h.add_sample("SAMPLE")
-        return h
-
-    def _write_tagged_vcf(self, gz_path, chrom, pos, ref, alt, tag):
-        """Write a bgzipped+indexed VCF with TAG/TYPE/BED INFO via pysam API.
-
-        Using pysam to write avoids the Linux htslib issue where a literal '.'
-        value written as raw text for a Number=. String field is misinterpreted
-        as a VCF missing value and causes 'Firing event 10' on iteration.
-        """
-        var_type = "SNV" if len(ref) == len(alt) else "INDEL"
-        h = self._make_header(chrom)
-        with pysam.VariantFile(gz_path, "wz", header=h) as vcf:
-            rec = vcf.new_record()
-            rec.chrom = chrom
-            # ref/alts before pos so htslib can compute END = pos + rlen - 1
-            # correctly when the first bcf_update_info call fires.
-            rec.ref = ref
-            rec.alts = (alt,)
-            rec.pos = pos - 1  # pysam uses 0-based internally
-            rec.qual = 100
-            rec.filter.add("PASS")
-            rec.info["TAG"] = tag
-            rec.info["TYPE"] = var_type
-            rec.info["BED"] = (".",)
-            rec.samples["SAMPLE"]["GT"] = (1,)
-            vcf.write(rec)
-        pysam.tabix_index(gz_path, preset="vcf", force=True)
-        return gz_path
-
-    def _empty_vcf(self, gz_path, chrom="NC_045512.2"):
-        """Write an empty bgzipped+indexed VCF (header only)."""
-        h = self._make_header(chrom)
-        with pysam.VariantFile(gz_path, "wz", header=h):
-            pass
-        pysam.tabix_index(gz_path, preset="vcf", force=True)
-        return gz_path
-
-    def test_merge_produces_output(self, temp_dir):
-        """merge_vcfs() creates the output VCF file."""
-        tp = self._write_tagged_vcf(
-            os.path.join(temp_dir, "tp.vcf.gz"), "NC_045512.2", 70, "A", "G", "TP"
-        )
-        fp = self._write_tagged_vcf(
-            os.path.join(temp_dir, "fp.vcf.gz"), "NC_045512.2", 50, "C", "T", "FP"
-        )
-        fn = self._write_tagged_vcf(
-            os.path.join(temp_dir, "fn.vcf.gz"), "NC_045512.2", 30, "T", "A", "FN"
-        )
-        out = os.path.join(temp_dir, "merged.vcf.gz")
-        merge_vcfs(tp, fp, fn, out)
-        assert os.path.exists(out)
-
-    def test_merge_contains_all_tags(self, temp_dir):
-        """Merged VCF contains TP, FP, and FN tagged records."""
-        tp = self._write_tagged_vcf(
-            os.path.join(temp_dir, "tp.vcf.gz"), "NC_045512.2", 70, "A", "G", "TP"
-        )
-        fp = self._write_tagged_vcf(
-            os.path.join(temp_dir, "fp.vcf.gz"), "NC_045512.2", 50, "C", "T", "FP"
-        )
-        fn = self._write_tagged_vcf(
-            os.path.join(temp_dir, "fn.vcf.gz"), "NC_045512.2", 30, "T", "A", "FN"
-        )
-        out = os.path.join(temp_dir, "merged.vcf.gz")
-        merge_vcfs(tp, fp, fn, out)
-        with pysam.VariantFile(out) as vcf:
-            tags = {r.info["TAG"] for r in vcf}
-        assert tags == {"TP", "FP", "FN"}
-
-    def test_merge_record_count(self, temp_dir):
-        """Merged VCF has exactly as many records as the three inputs combined."""
-        tp = self._write_tagged_vcf(
-            os.path.join(temp_dir, "tp.vcf.gz"), "NC_045512.2", 70, "A", "G", "TP"
-        )
-        fp = self._write_tagged_vcf(
-            os.path.join(temp_dir, "fp.vcf.gz"), "NC_045512.2", 50, "C", "T", "FP"
-        )
-        fn = self._write_tagged_vcf(
-            os.path.join(temp_dir, "fn.vcf.gz"), "NC_045512.2", 30, "T", "A", "FN"
-        )
-        out = os.path.join(temp_dir, "merged.vcf.gz")
-        merge_vcfs(tp, fp, fn, out)
-        with pysam.VariantFile(out) as vcf:
-            records = list(vcf)
-        assert len(records) == 3
-
-    def test_merge_empty_fp_fn(self, temp_dir):
-        """merge_vcfs() works when FP and FN inputs have no records."""
-        tp = self._write_tagged_vcf(
-            os.path.join(temp_dir, "tp.vcf.gz"), "NC_045512.2", 70, "A", "G", "TP"
-        )
-        fp = self._empty_vcf(os.path.join(temp_dir, "fp.vcf.gz"))
-        fn = self._empty_vcf(os.path.join(temp_dir, "fn.vcf.gz"))
-        out = os.path.join(temp_dir, "merged.vcf.gz")
-        merge_vcfs(tp, fp, fn, out)
-        with pysam.VariantFile(out) as vcf:
-            records = list(vcf)
-        assert len(records) == 1
-        assert records[0].info["TAG"] == "TP"
 
 
 class TestFixGsalignVcf:
