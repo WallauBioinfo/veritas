@@ -124,11 +124,14 @@ def merge_vcfs(tp_vcf, fp_vcf, fn_vcf, output_vcf):
         for record in vcf:
             new_record = out.new_record()
 
+            # ref/alts must be set before pos so htslib can compute rlen and
+            # derive a valid END = pos + rlen - 1 when bcf_update_info fires.
+            # Reversing this order produces END = pos - 1 < POS on Linux.
             new_record.chrom = record.chrom
-            new_record.pos = record.pos
-            new_record.id = record.id
             new_record.ref = record.ref
             new_record.alts = record.alts
+            new_record.pos = record.pos
+            new_record.id = record.id
             new_record.qual = record.qual
             new_record.filter.clear()
             for filter_name in record.filter:
@@ -237,11 +240,12 @@ def compare(
                 with pysam.VariantFile(vcf_file) as vcf:
                     for record in vcf:
                         new_record = out_vcf.new_record()
+                        # ref/alts before pos — see merge_vcfs for explanation
                         new_record.chrom = record.chrom
-                        new_record.pos = record.pos
-                        new_record.id = record.id
                         new_record.ref = record.ref
                         new_record.alts = record.alts
+                        new_record.pos = record.pos
+                        new_record.id = record.id
                         new_record.qual = record.qual
                         new_record.filter.clear()
                         for f in record.filter:

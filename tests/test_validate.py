@@ -253,9 +253,11 @@ class TestMergeVcfs:
         with pysam.VariantFile(gz_path, "wz", header=h) as vcf:
             rec = vcf.new_record()
             rec.chrom = chrom
-            rec.pos = pos - 1  # pysam uses 0-based internally
+            # ref/alts before pos so htslib can compute END = pos + rlen - 1
+            # correctly when the first bcf_update_info call fires.
             rec.ref = ref
             rec.alts = (alt,)
+            rec.pos = pos - 1  # pysam uses 0-based internally
             rec.qual = 100
             rec.filter.add("PASS")
             rec.info["TAG"] = tag
