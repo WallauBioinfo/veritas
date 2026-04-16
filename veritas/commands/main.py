@@ -26,15 +26,6 @@ REPO = "veritas_data"
 BRANCH = "main"
 
 
-def _require_token(token):
-    """Raise UsageError if no GitHub token is provided."""
-    if not token:
-        raise click.UsageError(
-            "A GitHub token is required. Set the GITHUB_TOKEN environment variable "
-            "or pass --token."
-        )
-
-
 def _require_tool(name: str) -> None:
     """Raise UsageError if an external tool is not on PATH."""
     if shutil.which(name) is None:
@@ -51,27 +42,20 @@ def cli():
 
 
 @cli.command()
-@click.option("-t", "--token", help="Github token", envvar="GITHUB_TOKEN")
-def list_datasets(
-    token,
-):
+def list_datasets():
     """
     List datasets available in the veritas_data repository.
     """
-    _require_token(token)
-    HEADERS = {"Authorization": f"token {token}"}
-
     datasets_metadata_paths = get_datasets_paths(
-        f"{OWNER}/{REPO}/git/trees/{BRANCH}?recursive=1", HEADERS
+        f"{OWNER}/{REPO}/git/trees/{BRANCH}?recursive=1"
     )
     datasets_information = get_metadata_information(
-        f"{OWNER}/{REPO}/contents", datasets_metadata_paths, HEADERS
+        f"{OWNER}/{REPO}/contents", datasets_metadata_paths
     )
     print_formatted_table(datasets_information)
 
 
 @cli.command()
-@click.option("-t", "--token", help="Github token", envvar="GITHUB_TOKEN")
 @click.option(
     "-d",
     "--dataset-name",
@@ -84,17 +68,14 @@ def list_datasets(
     help="Directory to save the downloaded dataset",
     default="veritas_datasets",
 )
-def get_dataset(token, dataset_name, output_dir):
+def get_dataset(dataset_name, output_dir):
     """
     Download dataset available in the veritas_data repository.
     """
-    _require_token(token)
-
     download_dataset(
         repo_path=f"{OWNER}/{REPO}",
         dataset_name=dataset_name,
         output_dir=output_dir,
-        token=token,
     )
 
 

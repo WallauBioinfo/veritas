@@ -184,14 +184,14 @@ class TestGetDatasetsPaths:
             ]
         )
         with patch("veritas.datasets.requests.get", return_value=mock_resp):
-            result = get_datasets_paths("owner/repo/git/trees/main?recursive=1", {})
+            result = get_datasets_paths("owner/repo/git/trees/main?recursive=1")
         assert result == ["datasets/pathogen/sample-A/metadata.yaml"]
 
     def test_empty_tree_returns_empty_list(self):
         """A repository with no files returns an empty list."""
         mock_resp = self._mock_tree([])
         with patch("veritas.datasets.requests.get", return_value=mock_resp):
-            result = get_datasets_paths("owner/repo/git/trees/main?recursive=1", {})
+            result = get_datasets_paths("owner/repo/git/trees/main?recursive=1")
         assert result == []
 
     def test_multiple_metadata_files_all_returned(self):
@@ -204,7 +204,7 @@ class TestGetDatasetsPaths:
             ]
         )
         with patch("veritas.datasets.requests.get", return_value=mock_resp):
-            result = get_datasets_paths("owner/repo/git/trees/main?recursive=1", {})
+            result = get_datasets_paths("owner/repo/git/trees/main?recursive=1")
         assert len(result) == 2
 
     def test_http_error_propagates(self):
@@ -215,13 +215,13 @@ class TestGetDatasetsPaths:
         mock_resp.raise_for_status.side_effect = req_lib.exceptions.HTTPError("403")
         with patch("veritas.datasets.requests.get", return_value=mock_resp):
             with pytest.raises(req_lib.exceptions.HTTPError):
-                get_datasets_paths("owner/repo/git/trees/main", {})
+                get_datasets_paths("owner/repo/git/trees/main")
 
     def test_request_uses_timeout(self):
         """requests.get is called with a timeout parameter."""
         mock_resp = self._mock_tree([])
         with patch("veritas.datasets.requests.get", return_value=mock_resp) as mock_get:
-            get_datasets_paths("owner/repo/git/trees/main?recursive=1", {})
+            get_datasets_paths("owner/repo/git/trees/main?recursive=1")
         _, kwargs = mock_get.call_args
         assert "timeout" in kwargs
 
@@ -243,7 +243,6 @@ class TestGetMetadataInformation:
             result = get_metadata_information(
                 "owner/repo/contents",
                 ["datasets/pathogen/sample-A/metadata.yaml"],
-                {},
             )
         assert len(result) == 1
         assert result[0]["pathogen"] == sample_yaml_metadata["pathogen"]
@@ -252,7 +251,7 @@ class TestGetMetadataInformation:
     def test_empty_paths_returns_empty_list(self):
         """No paths → no HTTP calls, empty list returned."""
         with patch("veritas.datasets.requests.get") as mock_get:
-            result = get_metadata_information("owner/repo/contents", [], {})
+            result = get_metadata_information("owner/repo/contents", [])
         mock_get.assert_not_called()
         assert result == []
 
@@ -264,6 +263,6 @@ class TestGetMetadataInformation:
             "datasets/pathogen/sample-B/metadata.yaml",
         ]
         with patch("veritas.datasets.requests.get", return_value=mock_resp) as mock_get:
-            result = get_metadata_information("owner/repo/contents", paths, {})
+            result = get_metadata_information("owner/repo/contents", paths)
         assert mock_get.call_count == 2
         assert len(result) == 2

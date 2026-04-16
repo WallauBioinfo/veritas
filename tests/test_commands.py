@@ -32,7 +32,6 @@ class TestCliHelp:
         runner = CliRunner()
         result = runner.invoke(cli, ["list-datasets", "--help"])
         assert result.exit_code == 0
-        assert "--token" in result.output
 
     def test_get_dataset_help(self):
         """get-dataset --help exits cleanly."""
@@ -66,39 +65,13 @@ class TestCliHelp:
         assert "--output" in result.output
 
 
-class TestListDatasetsCommand:
-    """Tests for the list-datasets command."""
-
-    def test_fails_without_token(self):
-        """list-datasets raises ValueError without a token."""
-        runner = CliRunner()
-        result = runner.invoke(cli, ["list-datasets"], env={"GITHUB_TOKEN": ""})
-        assert result.exit_code != 0
-
-    def test_accepts_token_option(self):
-        """list-datasets accepts --token without crashing on option parsing."""
-        runner = CliRunner()
-        result = runner.invoke(cli, ["list-datasets", "--token", "fake_token"])
-        assert result.exit_code != 2  # exit 2 = Click "No such option"
-
-
 class TestGetDatasetCommand:
     """Tests for the get-dataset command."""
-
-    def test_fails_without_token(self):
-        """get-dataset raises ValueError without a token."""
-        runner = CliRunner()
-        result = runner.invoke(
-            cli,
-            ["get-dataset", "--dataset-name", "veritas/sars-cov-2/SEARCH-8113"],
-            env={"GITHUB_TOKEN": ""},
-        )
-        assert result.exit_code != 0
 
     def test_requires_dataset_name(self):
         """get-dataset fails with exit code 2 when --dataset-name is absent."""
         runner = CliRunner()
-        result = runner.invoke(cli, ["get-dataset"], env={"GITHUB_TOKEN": "fake"})
+        result = runner.invoke(cli, ["get-dataset"])
         assert result.exit_code == 2
         assert (
             "dataset-name" in result.output.lower()
