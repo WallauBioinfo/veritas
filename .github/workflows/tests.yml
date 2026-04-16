@@ -9,9 +9,26 @@ on:
       - main
 
 jobs:
+  lint:
+    name: black (format check)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install black
+        run: pip install black==25.9.0
+
+      - name: Check formatting
+        run: black --check .
+
   test:
     name: pytest (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    needs: lint
     strategy:
       fail-fast: false
       matrix:
@@ -34,15 +51,36 @@ jobs:
           cache-downloads: true
 
       - name: Install veritas (editable)
-        run: pip install -e . --no-deps
+        run: pip install -e ".[dev]" --no-deps
 
-      - name: Run pytest
+      - name: Run unit and integration tests (no external tools required)
         run: |
           pytest tests/ -v \
             --tb=short \
+            -m "not requires_rtg and not requires_gsalign" \
             --cov=veritas \
             --cov-report=term-missing \
             --cov-report=xml:coverage.xml
+
+      - name: Run tests requiring RTG Tools
+        if: success() || failure()
+        run: |
+          pytest tests/ -v \
+            --tb=short \
+            -m "requires_rtg" \
+            --cov=veritas \
+            --cov-report=xml:coverage_rtg.xml \
+        continue-on-error: true
+
+      - name: Run tests requiring GSAlign
+        if: success() || failure()
+        run: |
+          pytest tests/ -v \
+            --tb=short \
+            -m "requires_gsalign" \
+            --cov=veritas \
+            --cov-report=xml:coverage_gsalign.xml \
+        continue-on-error: true
 
       - name: Upload coverage report
         uses: codecov/codecov-action@v5

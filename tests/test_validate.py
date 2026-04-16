@@ -7,6 +7,7 @@ from veritas.validate import (
     in_bed_region,
     process_gsalign_vcf,
     fix_gsalign_vcf,
+    merge_vcfs,
 )
 
 
@@ -222,6 +223,107 @@ class TestProcessGsalignVcf:
         with gzip.open(result, "rt") as fh:
             header_lines = [l for l in fh if l.startswith("##FORMAT")]
         assert any("ID=GT" in l for l in header_lines)
+
+
+class TestMergeVcfs:
+    """Tests for merge_vcfs()."""
+
+    def _write_tagged_vcf(self, path, chrom, pos, ref, alt, tag):
+        """Write a minimal VCF with TAG and TYPE INFO fields already set."""
+        with open(path, "w") as f:
+            f.write("##fileformat=VCFv4.2\n")
+            f.write(f"##contig=<ID={chrom},length=200>\n")
+            f.write('##INFO=<ID=TAG,Number=1,Type=String,Description="Tag">\n')
+            f.write('##INFO=<ID=TYPE,Number=1,Type=String,Description="Type">\n')
+            f.write('##INFO=<ID=BED,Number=.,Type=String,Description="BED">\n')
+            f.write('##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">\n')
+            f.write(f"#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tSAMPLE\n")
+            var_type = "SNV" if len(ref) == len(alt) else "INDEL"
+            f.write(
+                f"{chrom}\t{pos}\t.\t{ref}\t{alt}\t100\tPASS\tTAG={tag};TYPE={var_type};BED=.\tGT\t1\n"
+            )
+        gz = path + ".gz"
+        pysam.tabix_compress(path, gz, force=True)
+        pysam.tabix_index(gz, preset="vcf", force=True)
+        return gz
+
+    def test_merge_produces_output(self, temp_dir):
+        """merge_vcfs() creates the output VCF file."""
+        tp = self._write_tagged_vcf(
+            os.path.join(temp_dir, "tp.vcf"), "NC_045512.2", 70, "A", "G", "TP"
+        )
+        fp = self._write_tagged_vcf(
+            os.path.join(temp_dir, "fp.vcf"), "NC_045512.2", 50, "C", "T", "FP"
+        )
+        fn = self._write_tagged_vcf(
+            os.path.join(temp_dir, "fn.vcf"), "NC_045512.2", 30, "T", "A", "FN"
+        )
+        out = os.path.join(temp_dir, "merged.vcf.gz")
+        merge_vcfs(tp, fp, fn, out)
+        assert os.path.exists(out)
+
+    def test_merge_contains_all_tags(self, temp_dir):
+        """Merged VCF contains TP, FP, and FN tagged records."""
+        tp = self._write_tagged_vcf(
+            os.path.join(temp_dir, "tp.vcf"), "NC_045512.2", 70, "A", "G", "TP"
+        )
+        fp = self._write_tagged_vcf(
+            os.path.join(temp_dir, "fp.vcf"), "NC_045512.2", 50, "C", "T", "FP"
+        )
+        fn = self._write_tagged_vcf(
+            os.path.join(temp_dir, "fn.vcf"), "NC_045512.2", 30, "T", "A", "FN"
+        )
+        out = os.path.join(temp_dir, "merged.vcf.gz")
+        merge_vcfs(tp, fp, fn, out)
+        with pysam.VariantFile(out) as vcf:
+            tags = {r.info["TAG"] for r in vcf}
+        assert tags == {"TP", "FP", "FN"}
+
+    def test_merge_record_count(self, temp_dir):
+        """Merged VCF has exactly as many records as the three inputs combined."""
+        tp = self._write_tagged_vcf(
+            os.path.join(temp_dir, "tp.vcf"), "NC_045512.2", 70, "A", "G", "TP"
+        )
+        fp = self._write_tagged_vcf(
+            os.path.join(temp_dir, "fp.vcf"), "NC_045512.2", 50, "C", "T", "FP"
+        )
+        fn = self._write_tagged_vcf(
+            os.path.join(temp_dir, "fn.vcf"), "NC_045512.2", 30, "T", "A", "FN"
+        )
+        out = os.path.join(temp_dir, "merged.vcf.gz")
+        merge_vcfs(tp, fp, fn, out)
+        with pysam.VariantFile(out) as vcf:
+            records = list(vcf)
+        assert len(records) == 3
+
+    def test_merge_empty_fp_fn(self, temp_dir):
+        """merge_vcfs() works when FP and FN inputs have no records."""
+
+        def _empty_vcf(path):
+            with open(path, "w") as f:
+                f.write("##fileformat=VCFv4.2\n")
+                f.write("##contig=<ID=NC_045512.2,length=200>\n")
+                f.write('##INFO=<ID=TAG,Number=1,Type=String,Description="Tag">\n')
+                f.write('##INFO=<ID=TYPE,Number=1,Type=String,Description="Type">\n')
+                f.write('##INFO=<ID=BED,Number=.,Type=String,Description="BED">\n')
+                f.write('##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">\n')
+                f.write("#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tSAMPLE\n")
+            gz = path + ".gz"
+            pysam.tabix_compress(path, gz, force=True)
+            pysam.tabix_index(gz, preset="vcf", force=True)
+            return gz
+
+        tp = self._write_tagged_vcf(
+            os.path.join(temp_dir, "tp.vcf"), "NC_045512.2", 70, "A", "G", "TP"
+        )
+        fp = _empty_vcf(os.path.join(temp_dir, "fp.vcf"))
+        fn = _empty_vcf(os.path.join(temp_dir, "fn.vcf"))
+        out = os.path.join(temp_dir, "merged.vcf.gz")
+        merge_vcfs(tp, fp, fn, out)
+        with pysam.VariantFile(out) as vcf:
+            records = list(vcf)
+        assert len(records) == 1
+        assert records[0].info["TAG"] == "TP"
 
 
 class TestFixGsalignVcf:

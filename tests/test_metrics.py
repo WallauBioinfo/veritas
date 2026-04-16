@@ -121,6 +121,41 @@ class TestCalcMetrics:
         assert result["all"]["SNV"]["TP"] == 0
         assert result["all"]["INDEL"]["TP"] == 0
 
+    def test_variant_in_multiple_bed_regions(self):
+        """A variant tagged PRIMER and MASK is counted in both region buckets."""
+        result = _run_calc_metrics(
+            [_mock_record(50, "C", "T", "FP", "SNV", ["PRIMER", "MASK"])],
+            has_primer_bed=True,
+            has_mask_bed=True,
+        )
+        assert result["counts_primer"]["SNV"]["FP"] == 1
+        assert result["counts_mask"]["SNV"]["FP"] == 1
+        # Also counted in the global ALL bucket
+        assert result["all"]["SNV"]["FP"] == 1
+
+    def test_low_cov_query_counts_when_enabled(self):
+        result = _run_calc_metrics(
+            [_mock_record(90, "A", "G", "FP", "SNV", ["LOW_COV_QUERY"])],
+            has_low_cov_query_bed=True,
+        )
+        assert result["counts_low_cov_query"]["SNV"]["FP"] == 1
+
+    def test_low_cov_query_none_when_disabled(self):
+        result = _run_calc_metrics(
+            [_mock_record(90, "A", "G", "FP", "SNV", ["LOW_COV_QUERY"])],
+            has_low_cov_query_bed=False,
+        )
+        assert result["counts_low_cov_query"] is None
+
+    def test_unknown_tag_ignored(self):
+        """Records with an unrecognised TAG value are silently skipped."""
+        result = _run_calc_metrics(
+            [_mock_record(50, "A", "G", "UNKNOWN", "SNV", ["."])]
+        )
+        assert result["all"]["SNV"]["TP"] == 0
+        assert result["all"]["SNV"]["FP"] == 0
+        assert result["all"]["SNV"]["FN"] == 0
+
 
 class TestSaveMetricsTsv:
     """Tests for save_metrics_tsv()."""
