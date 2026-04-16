@@ -8,6 +8,7 @@ import glob
 from veritas.logger import logger
 
 BASIC_URL = f"https://api.github.com/repos"
+_REQUEST_TIMEOUT = 30  # seconds
 
 
 def get_datasets_paths(url: str, headers: str) -> list[str]:
@@ -21,7 +22,9 @@ def get_datasets_paths(url: str, headers: str) -> list[str]:
     Returns:
         List of paths to metadata.yaml files
     """
-    response = requests.get(f"{BASIC_URL}/{url}", headers=headers)
+    response = requests.get(
+        f"{BASIC_URL}/{url}", headers=headers, timeout=_REQUEST_TIMEOUT
+    )
     response.raise_for_status()
 
     data = response.json()
@@ -36,7 +39,7 @@ def get_datasets_paths(url: str, headers: str) -> list[str]:
     return metadata
 
 
-def get_medata_information(url: str, paths: list[str], headers: str) -> list[dict]:
+def get_metadata_information(url: str, paths: list[str], headers: str) -> list[dict]:
     """
     Retrieve metadata information from the repository.
 
@@ -51,7 +54,7 @@ def get_medata_information(url: str, paths: list[str], headers: str) -> list[dic
     datasets = []
     for path in paths:
         request_url = f"{BASIC_URL}/{url}/{path}"
-        response = requests.get(request_url, headers=headers)
+        response = requests.get(request_url, headers=headers, timeout=_REQUEST_TIMEOUT)
         response.raise_for_status()
         data = response.json()
         content_encoded = data["content"]
@@ -70,6 +73,10 @@ def print_formatted_table(data):
     Args:
         data: List of dictionaries containing dataset metadata
     """
+    if not data:
+        logger.warning("No datasets found.")
+        return
+
     fields = [
         "dataset",
         "dataset_version",
@@ -131,11 +138,15 @@ def download_dataset(repo_path, dataset_name, output_dir=None, token=None):
     """
     Download entire folder from GitHub with minimal API calls.
 
+    For real datasets, downloads FASTQ files from SRA via parallel-fastq-dump
+    (requires SRA Toolkit and seqkit on PATH). For artificial datasets,
+    downloads FASTQ files from Zenodo via wget.
+
     Args:
         repo_path: Repository path (owner/repo)
         dataset_name: Name of the dataset to download
         output_dir: Local directory to save files
-        token: GitHub token (optional, but recommended)
+        token: GitHub token (optional, but recommended for private repos)
     """
     g = github.Github(auth=github.Auth.Token(token)) if token else github.Github()
     repo = g.get_repo(repo_path)
@@ -167,10 +178,10 @@ def download_dataset(repo_path, dataset_name, output_dir=None, token=None):
                 if file_content.name == "metadata.yaml":
                     yaml_data = yaml.safe_load(content)
                     if yaml_data["dataset_type"] == "real":
-                        print("Real dataset detected, downloading from SRA.")
+                        logger.info("Real dataset detected, downloading from SRA.")
                         sra_id = yaml_data.get("sra")
                         sample = yaml_data.get("sample")
-                        print(f"Downloading fastq for {sra_id}")
+                        logger.info(f"Downloading fastq for {sra_id}")
                         cmd = [
                             "parallel-fastq-dump",
                             "--sra-id",
@@ -188,7 +199,9 @@ def download_dataset(repo_path, dataset_name, output_dir=None, token=None):
                             stdout=subprocess.DEVNULL,
                             stderr=subprocess.DEVNULL,
                         )
-                        print(f"Keeping paired reads on fastqs files for {sra_id}")
+                        logger.info(
+                            f"Keeping paired reads on fastqs files for {sra_id}"
+                        )
                         cmd = [
                             "seqkit",
                             "pair",
@@ -237,17 +250,19 @@ def download_dataset(repo_path, dataset_name, output_dir=None, token=None):
                             stderr=subprocess.DEVNULL,
                         )
                     elif yaml_data["dataset_type"] == "artificial":
-                        print("Artificial dataset detected, downloading from Zenodo.")
+                        logger.info(
+                            "Artificial dataset detected, downloading from Zenodo."
+                        )
                         zenodo_id = yaml_data.get("zenodo_id")
-                        print(f"Fetching file list from Zenodo record {zenodo_id}...")
+                        logger.info(
+                            f"Fetching file list from Zenodo record {zenodo_id}..."
+                        )
 
-                        # Get file list from Zenodo API
                         api_url = f"https://zenodo.org/api/records/{zenodo_id}"
-                        response = requests.get(api_url)
+                        response = requests.get(api_url, timeout=_REQUEST_TIMEOUT)
                         response.raise_for_status()
                         zenodo_data = response.json()
 
-                        # Filter for .fastq.gz files
                         fastq_files = [
                             f
                             for f in zenodo_data.get("files", [])
@@ -255,11 +270,11 @@ def download_dataset(repo_path, dataset_name, output_dir=None, token=None):
                         ]
 
                         if not fastq_files:
-                            print(
-                                f"Warning: No .fastq.gz files found in Zenodo record {zenodo_id}"
+                            logger.warning(
+                                f"No .fastq.gz files found in Zenodo record {zenodo_id}"
                             )
                         else:
-                            print(
+                            logger.info(
                                 f"Found {len(fastq_files)} fastq.gz file(s) to download"
                             )
 
@@ -268,7 +283,7 @@ def download_dataset(repo_path, dataset_name, output_dir=None, token=None):
                                 file_url = file_info["links"]["self"]
                                 output_path = os.path.join(output_dir, file_name)
 
-                                print(f"Downloading {file_name}...")
+                                logger.info(f"Downloading {file_name}...")
                                 cmd = [
                                     "wget",
                                     file_url,
@@ -281,7 +296,7 @@ def download_dataset(repo_path, dataset_name, output_dir=None, token=None):
                                     stdout=subprocess.DEVNULL,
                                     stderr=subprocess.DEVNULL,
                                 )
-                                print(f"   Downloaded {file_name}")
+                                logger.info(f"Downloaded {file_name}")
             else:
                 content = file_data.decoded_content
 

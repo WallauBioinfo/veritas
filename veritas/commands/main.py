@@ -4,7 +4,7 @@ import pysam
 import shutil
 from veritas.datasets import (
     get_datasets_paths,
-    get_medata_information,
+    get_metadata_information,
     print_formatted_table,
     download_dataset,
     find_dataset_file,
@@ -26,6 +26,24 @@ REPO = "veritas_data"
 BRANCH = "main"
 
 
+def _require_token(token):
+    """Raise UsageError if no GitHub token is provided."""
+    if not token:
+        raise click.UsageError(
+            "A GitHub token is required. Set the GITHUB_TOKEN environment variable "
+            "or pass --token."
+        )
+
+
+def _require_tool(name: str) -> None:
+    """Raise UsageError if an external tool is not on PATH."""
+    if shutil.which(name) is None:
+        raise click.UsageError(
+            f"Required tool '{name}' not found on PATH. "
+            f"Install it via the conda environment: micromamba env create -f env.yaml"
+        )
+
+
 @click.group()
 def cli():
     "Tool to get benchmark datasets and compare VCF files"
@@ -33,31 +51,27 @@ def cli():
 
 
 @cli.command()
-@click.option("-t", "--token", help="Github token (temporary)", envvar="GITHUB_TOKEN")
+@click.option("-t", "--token", help="Github token", envvar="GITHUB_TOKEN")
 def list_datasets(
     token,
 ):
     """
     List datasets available in the veritas_data repository.
     """
-    # temporary section
-    if not token:
-        raise ValueError(
-            "Please set your GitHub token in the GITHUB_TOKEN environment variable."
-        )
+    _require_token(token)
     HEADERS = {"Authorization": f"token {token}"}
 
     datasets_metadata_paths = get_datasets_paths(
         f"{OWNER}/{REPO}/git/trees/{BRANCH}?recursive=1", HEADERS
     )
-    datasets_information = get_medata_information(
+    datasets_information = get_metadata_information(
         f"{OWNER}/{REPO}/contents", datasets_metadata_paths, HEADERS
     )
     print_formatted_table(datasets_information)
 
 
 @cli.command()
-@click.option("-t", "--token", help="Github token (temporary)", envvar="GITHUB_TOKEN")
+@click.option("-t", "--token", help="Github token", envvar="GITHUB_TOKEN")
 @click.option(
     "-d",
     "--dataset-name",
@@ -74,11 +88,7 @@ def get_dataset(token, dataset_name, output_dir):
     """
     Download dataset available in the veritas_data repository.
     """
-    # temporary section
-    if not token:
-        raise ValueError(
-            "Please set your GitHub token in the GITHUB_TOKEN environment variable."
-        )
+    _require_token(token)
 
     download_dataset(
         repo_path=f"{OWNER}/{REPO}",
@@ -224,6 +234,11 @@ def validate(
             "--reference is required when using --query-fasta. Provide either --reference or --dataset-dir with reference.fa."
         )
 
+    _require_tool("rtg")
+    _require_tool("bcftools")
+    if query_fasta:
+        _require_tool("GSAlign")
+
     os.makedirs(output_dir, exist_ok=True)
 
     if query_fasta:
@@ -238,7 +253,8 @@ def validate(
         )
 
         final_alignment_path = os.path.join(gsalign_dir, "alignment.fa")
-        os.rename(gsalign_alignment, final_alignment_path)
+        if os.path.exists(gsalign_alignment):
+            os.rename(gsalign_alignment, final_alignment_path)
 
         logger.info("Processing GSAlign VCF output...")
 
@@ -315,21 +331,20 @@ def convert(reference, query, sample, output):
     """
     Convert FASTA to VCF using GSAlign.
     """
-    import os
+    _require_tool("GSAlign")
 
     if not sample:
         try:
             with open(query, "r") as f:
                 first_line = f.readline().strip()
                 if first_line.startswith(">"):
-                    # Use the first word after > as sample name
                     sample = first_line[1:].split()[0]
                 else:
                     sample = "SAMPLE"
                     logger.warning(
                         f"Could not determine sample name from {query}, using 'SAMPLE'"
                     )
-        except Exception as e:
+        except OSError as e:
             logger.error(f"Error reading query file: {e}")
             raise click.Abort()
 

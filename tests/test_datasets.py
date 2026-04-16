@@ -1,6 +1,16 @@
+import base64
+import json
 import os
 import pytest
-from veritas.datasets import print_formatted_table, find_dataset_file, find_dataset_dir
+import yaml
+from unittest.mock import MagicMock, patch
+from veritas.datasets import (
+    print_formatted_table,
+    find_dataset_file,
+    find_dataset_dir,
+    get_datasets_paths,
+    get_metadata_information,
+)
 
 
 class TestPrintFormattedTable:
@@ -142,3 +152,118 @@ class TestFindDatasetDir:
         result = find_dataset_dir(temp_dir, "rtg_sdf", "RTG SDF")
         # os.path.isdir will be False for a regular file
         assert result is None
+
+
+class TestPrintFormattedTableEmptyList:
+    """Edge-case: empty input list."""
+
+    def test_empty_list_does_not_raise(self, capsys):
+        """Empty dataset list returns without error and prints no table."""
+        print_formatted_table([])
+        captured = capsys.readouterr()
+        assert "┌" not in captured.out
+
+
+class TestGetDatasetsPaths:
+    """Tests for get_datasets_paths() — all HTTP calls are mocked."""
+
+    def _mock_tree(self, paths):
+        items = [{"type": "blob", "path": p} for p in paths]
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"tree": items}
+        mock_resp.raise_for_status = MagicMock()
+        return mock_resp
+
+    def test_returns_only_metadata_yaml_paths(self):
+        """Only paths that end with metadata.yaml are returned."""
+        mock_resp = self._mock_tree(
+            [
+                "datasets/pathogen/sample-A/metadata.yaml",
+                "datasets/pathogen/sample-A/reference.fa",
+                "README.md",
+            ]
+        )
+        with patch("veritas.datasets.requests.get", return_value=mock_resp):
+            result = get_datasets_paths("owner/repo/git/trees/main?recursive=1", {})
+        assert result == ["datasets/pathogen/sample-A/metadata.yaml"]
+
+    def test_empty_tree_returns_empty_list(self):
+        """A repository with no files returns an empty list."""
+        mock_resp = self._mock_tree([])
+        with patch("veritas.datasets.requests.get", return_value=mock_resp):
+            result = get_datasets_paths("owner/repo/git/trees/main?recursive=1", {})
+        assert result == []
+
+    def test_multiple_metadata_files_all_returned(self):
+        """All metadata.yaml files across multiple datasets are collected."""
+        mock_resp = self._mock_tree(
+            [
+                "datasets/virus/sample-A/metadata.yaml",
+                "datasets/virus/sample-B/metadata.yaml",
+                "datasets/virus/sample-A/truth.vcf.gz",
+            ]
+        )
+        with patch("veritas.datasets.requests.get", return_value=mock_resp):
+            result = get_datasets_paths("owner/repo/git/trees/main?recursive=1", {})
+        assert len(result) == 2
+
+    def test_http_error_propagates(self):
+        """raise_for_status() exceptions bubble up to the caller."""
+        import requests as req_lib
+
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status.side_effect = req_lib.exceptions.HTTPError("403")
+        with patch("veritas.datasets.requests.get", return_value=mock_resp):
+            with pytest.raises(req_lib.exceptions.HTTPError):
+                get_datasets_paths("owner/repo/git/trees/main", {})
+
+    def test_request_uses_timeout(self):
+        """requests.get is called with a timeout parameter."""
+        mock_resp = self._mock_tree([])
+        with patch("veritas.datasets.requests.get", return_value=mock_resp) as mock_get:
+            get_datasets_paths("owner/repo/git/trees/main?recursive=1", {})
+        _, kwargs = mock_get.call_args
+        assert "timeout" in kwargs
+
+
+class TestGetMetadataInformation:
+    """Tests for get_metadata_information() — all HTTP calls are mocked."""
+
+    def _make_response(self, yaml_dict):
+        encoded = base64.b64encode(yaml.dump(yaml_dict).encode()).decode()
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"content": encoded}
+        mock_resp.raise_for_status = MagicMock()
+        return mock_resp
+
+    def test_returns_parsed_metadata(self, sample_yaml_metadata):
+        """Decoded YAML content is returned with a 'dataset' key injected."""
+        mock_resp = self._make_response(sample_yaml_metadata)
+        with patch("veritas.datasets.requests.get", return_value=mock_resp):
+            result = get_metadata_information(
+                "owner/repo/contents",
+                ["datasets/pathogen/sample-A/metadata.yaml"],
+                {},
+            )
+        assert len(result) == 1
+        assert result[0]["pathogen"] == sample_yaml_metadata["pathogen"]
+        assert "dataset" in result[0]
+
+    def test_empty_paths_returns_empty_list(self):
+        """No paths → no HTTP calls, empty list returned."""
+        with patch("veritas.datasets.requests.get") as mock_get:
+            result = get_metadata_information("owner/repo/contents", [], {})
+        mock_get.assert_not_called()
+        assert result == []
+
+    def test_multiple_paths_all_fetched(self, sample_yaml_metadata):
+        """One HTTP call is made per path."""
+        mock_resp = self._make_response(sample_yaml_metadata)
+        paths = [
+            "datasets/pathogen/sample-A/metadata.yaml",
+            "datasets/pathogen/sample-B/metadata.yaml",
+        ]
+        with patch("veritas.datasets.requests.get", return_value=mock_resp) as mock_get:
+            result = get_metadata_information("owner/repo/contents", paths, {})
+        assert mock_get.call_count == 2
+        assert len(result) == 2
