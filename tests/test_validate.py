@@ -306,8 +306,12 @@ class TestMergeVcfs:
                 f.write('##INFO=<ID=TAG,Number=1,Type=String,Description="Tag">\n')
                 f.write('##INFO=<ID=TYPE,Number=1,Type=String,Description="Type">\n')
                 f.write('##INFO=<ID=BED,Number=.,Type=String,Description="BED">\n')
-                f.write('##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">\n')
-                f.write("#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tSAMPLE\n")
+                f.write(
+                    '##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">\n'
+                )
+                f.write(
+                    "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tSAMPLE\n"
+                )
             gz = path + ".gz"
             pysam.tabix_compress(path, gz, force=True)
             pysam.tabix_index(gz, preset="vcf", force=True)
