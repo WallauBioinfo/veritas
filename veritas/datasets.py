@@ -11,20 +11,17 @@ BASIC_URL = f"https://api.github.com/repos"
 _REQUEST_TIMEOUT = 30  # seconds
 
 
-def get_datasets_paths(url: str, headers: str) -> list[str]:
+def get_datasets_paths(url: str) -> list[str]:
     """
     Get paths of all metadata.yaml files in the repository.
 
     Args:
         url: GitHub API URL
-        headers: Request headers
 
     Returns:
         List of paths to metadata.yaml files
     """
-    response = requests.get(
-        f"{BASIC_URL}/{url}", headers=headers, timeout=_REQUEST_TIMEOUT
-    )
+    response = requests.get(f"{BASIC_URL}/{url}", timeout=_REQUEST_TIMEOUT)
     response.raise_for_status()
 
     data = response.json()
@@ -39,14 +36,13 @@ def get_datasets_paths(url: str, headers: str) -> list[str]:
     return metadata
 
 
-def get_metadata_information(url: str, paths: list[str], headers: str) -> list[dict]:
+def get_metadata_information(url: str, paths: list[str]) -> list[dict]:
     """
     Retrieve metadata information from the repository.
 
     Args:
         url: GitHub API URL
         paths: List of paths to metadata.yaml files
-        headers: Request headers
 
     Returns:
         List of dictionaries containing dataset metadata
@@ -54,7 +50,7 @@ def get_metadata_information(url: str, paths: list[str], headers: str) -> list[d
     datasets = []
     for path in paths:
         request_url = f"{BASIC_URL}/{url}/{path}"
-        response = requests.get(request_url, headers=headers, timeout=_REQUEST_TIMEOUT)
+        response = requests.get(request_url, timeout=_REQUEST_TIMEOUT)
         response.raise_for_status()
         data = response.json()
         content_encoded = data["content"]
@@ -134,7 +130,7 @@ def print_formatted_table(data):
     print(end_separator)
 
 
-def download_dataset(repo_path, dataset_name, output_dir=None, token=None):
+def download_dataset(repo_path, dataset_name, output_dir=None):
     """
     Download entire folder from GitHub with minimal API calls.
 
@@ -146,9 +142,8 @@ def download_dataset(repo_path, dataset_name, output_dir=None, token=None):
         repo_path: Repository path (owner/repo)
         dataset_name: Name of the dataset to download
         output_dir: Local directory to save files
-        token: GitHub token (optional, but recommended for private repos)
     """
-    g = github.Github(auth=github.Auth.Token(token)) if token else github.Github()
+    g = github.Github()
     repo = g.get_repo(repo_path)
 
     dataset_name_formatted = (

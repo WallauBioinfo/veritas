@@ -89,26 +89,12 @@ veritas --help
 
 ## Commands
 
-### About github token
-
-The neccessity of a GitHub token is  veritas `list-datasets` command and `get-dataset` commands. It is a temporary measure until the veritas_data repository is made public. Please solicite a token via e-mail to zimmer.filipe@gmail.com and configure into your environment variables with:
-
-```bash
-export GITHUB_TOKEN="your_token_here"
-```
-
 ### 1. List Available Datasets
 
 View all benchmark datasets available in the veritas_data repository with detailed metadata.
 
 ```bash 
 veritas list-datasets
-```
-
-Or pass the token as an argument:
-
-```bash
-veritas list-datasets --token YOUR_GITHUB_TOKEN
 ```
 
 **Output example:**
@@ -133,7 +119,6 @@ Download a specific benchmark dataset including all necessary files for validati
 
 ```bash
 veritas get-dataset \
-  --token YOUR_GITHUB_TOKEN \
   --dataset-name veritas/sars-cov-2/SEARCH-8113 \
   --output-dir datasets
 ```
@@ -151,7 +136,6 @@ veritas get-dataset \
 
 | Option | Short | Description | Default |
 |--------|-------|-------------|---------|
-| `--token` | `-t` | GitHub token | $GITHUB_TOKEN |
 | `--dataset-name` | `-d` | Dataset name (e.g., veritas/sars-cov-2/SEARCH-8113) | Required |
 | `--output-dir` | `-o` | Directory to save dataset | veritas_datasets |
 
@@ -415,9 +399,6 @@ See [FASTA-to-VCF Conversion Pipeline](#fasta-to-vcf-conversion-pipeline) for a 
 ### Workflow 1: Complete Benchmark with Dataset Download
 
 ```bash
-# Set your GitHub token
-export GITHUB_TOKEN="your_token_here"
-
 # 1. List available datasets
 veritas list-datasets
 
