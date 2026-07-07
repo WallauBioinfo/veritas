@@ -1,0 +1,53 @@
+name: veritas-executor
+
+# Dispatched externally by PathoEQA via: POST /repos/{owner}/{repo}/actions/workflows/veritas-executor.yml/dispatches
+
+on:
+  workflow_dispatch:
+    inputs:
+      attempt_id:
+        description: "PathoEQA attempt identifier"
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: pathoeqa-veritas-staging
+  cancel-in-progress: false
+
+jobs:
+  run-veritas:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    # Job-level scopes needed for execution and signature verification
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      # Fail-fast validation. Runs before any other steps.
+      - name: Validate attempt_id
+        shell: bash
+        env:
+          RAW_ATTEMPT_ID: ${{ github.event.inputs.attempt_id }}
+        run: |
+          set -euo pipefail
+
+          ATTEMPT_ID="${RAW_ATTEMPT_ID}"
+
+          if [[ -z "${ATTEMPT_ID}" ]] || ! [[ "${ATTEMPT_ID}" =~ ^[A-Za-z0-9._-]{1,64}$ ]]; then
+            echo "::error title=INPUT_MALFORMED::attempt_id missing or malformed"
+            exit 1
+          fi
+
+          echo "attempt_id=${ATTEMPT_ID}" >> "$GITHUB_OUTPUT"
+
+          echo "veritas-executor: input accepted for attempt_id=${ATTEMPT_ID:0:8}… (truncated)"
+
+      # 40-char commit SHA for external security.
+      - name: Checkout
+        uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
+
+      # --- End of Epic 1.1 scope ---
