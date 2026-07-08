@@ -21,13 +21,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 90
 
-    # Job-level scopes needed for execution and signature verification
+    # Job-level scopes
     permissions:
-      contents: read
-      id-token: write
+      contents: read # for checkout and pull-down of Veritas (branch specified dynamically in PathoEQA POST request)
+      id-token: write # for OIDC authentication to PathoEQA
 
     steps:
-      # Fail-fast validation. Runs before any other steps.
       - name: Validate attempt_id
         shell: bash
         env:
@@ -46,8 +45,8 @@ jobs:
 
           echo "veritas-executor: input accepted for attempt_id=${ATTEMPT_ID:0:8}… (truncated)"
 
-      # 40-char commit SHA for external security.
-      - name: Checkout
-        uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
+      # Download Veritas (40-char commit SHA for external security)
+      - name: Checkout Veritas
+        uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # GH checkout action tool v4.1.7
 
       # --- End of Epic 1.1 scope ---
