@@ -4,7 +4,7 @@ import sys
 import os
 
 from veritas_runner.exceptions import VeritasRunnerError
-from veritas_runner.failures import FailureClass
+from veritas_runner.action_status import StatusClass
 from veritas_runner.runner import run_attempt
 
 
@@ -19,7 +19,7 @@ def main() -> int:
     run_parser.add_argument("--timeout", type=int, 
         default=int(os.getenv("VERITAS_TIMEOUT", "900")), 
         help="Execution timeout in seconds (Env: VERITAS_TIMEOUT)")
-    run_parser.add_argument("--dry-run", action="store_true",  help="Resolve and validate inputs only, do not run Veritas")
+    run_parser.add_argument("--dry-run", action="store_true", help="Resolve and validate inputs only, do not run Veritas")
 
     args = parser.parse_args()
 
@@ -32,7 +32,7 @@ def main() -> int:
         )
         print(json.dumps({
             "attempt_id": result.attempt_id,
-            "class": result.failure_class.value,
+            "status": StatusClass.SUCCESS.value,
             "duration_ms": result.duration_ms,
             "veritas_version": result.veritas_version,
         }))
@@ -41,24 +41,22 @@ def main() -> int:
     except VeritasRunnerError as e:
         print(json.dumps({
             "attempt_id": args.attempt_id,
-            "class": e.failure_class.value,
+            "status": e.failure_class.value,
             "duration_ms": None,
             "message": str(e),
         }))
         print(str(e), file=sys.stderr)
-        return 1
+        return e.failure_class.exit_code
 
     except Exception as e:
-        # Safety net: anything unclassified still exits 1 and still
-        # emits the JSON line, falling back to INTERNAL_ERROR.
         print(json.dumps({
             "attempt_id": args.attempt_id,
-            "class": FailureClass.INTERNAL_ERROR.value,
+            "status": StatusClass.INTERNAL_ERROR.value,
             "duration_ms": None,
             "message": str(e),
         }))
-        print(f"unhandled exception: {e}", file=sys.stderr)
-        return 1
+        print(f"Unknown exception: {e}", file=sys.stderr)
+        return StatusClass.INTERNAL_ERROR.exit_code
 
 
 if __name__ == "__main__":
