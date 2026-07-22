@@ -14,7 +14,8 @@ def main() -> int:
 
     run_parser = subparsers.add_parser("run-attempt")
     run_parser.add_argument("--attempt-id", required=True, help="The unique ID of the analysis attempt")
-    run_parser.add_argument("--output-dir", os.getenv("VERITAS_OUTPUT_DIR", "./output"), 
+    run_parser.add_argument("--output-dir", 
+        default=os.getenv("VERITAS_OUTPUT_DIR", "./output"), 
         help="Directory for logs and reports (Env: VERITAS_OUTPUT_DIR)")
     run_parser.add_argument("--timeout", type=int, 
         default=int(os.getenv("VERITAS_TIMEOUT", "900")), 

@@ -31,9 +31,9 @@ class StatusClass(str, Enum):
         if self == StatusClass.SUCCESS:
             return 0
         if self in {StatusClass.INVALID_INPUT, StatusClass.ATTEMPT_ID_NOT_FOUND, StatusClass.CONFIG_ERROR}:
-            return 11 # Config / Input Error
+            return 10 # Config / Input Error
         if self in {StatusClass.VERITAS_ANALYSIS_FAILED, StatusClass.VERITAS_REPORT_INVALID, StatusClass.TRUTH_INCOMPATIBLE}:
             return 20 # Analysis Failure
         if self in {StatusClass.TIMEOUT, StatusClass.TRANSIENT_IO}:
-            return 30 # Timeout
-        return 10 # Fallback for crashed / internal / transient error #????
+            return 30 # retryable
+        return 40 # Fallback for crashed / internal
