@@ -14,47 +14,6 @@ from status import StatusClass
 logger = logging.getLogger(__name__)
 
 MAX_MANIFEST_SIZE_BYTES = 256 * 1024  # 256 KB limit per ADR-13
-REQUIRED_TRUTH_ROLES: Set[str] = {"reference_fasta", "truth_vcf", "truth_tbi", "rtg_sdf"}
-
-
-def get_query_fasta(sample: SampleInput) -> Optional[ManifestFile]:
-    """Extracts the query FASTA file from a sample's input array."""
-    return next((i for i in sample.inputs if i.role == "query_fasta"), None)
-
-
-def get_truth_file(sample: SampleInput, role: str) -> Optional[ManifestFile]:
-    """Extracts a specific file from the sample's truth package by role."""
-    if not sample.truth_package:
-        return None
-    return next((f for f in sample.truth_package.files if f.role == role), None)
-
-
-def validate_sample_files(sample: SampleInput) -> None:
-    """Validates that all required inputs and truth package files exist with HTTPS URLs and SHA-256 hashes."""
-    q_fasta = get_query_fasta(sample)
-    if not q_fasta or not q_fasta.url.startswith("https://") or not q_fasta.sha256:
-        raise VeritasRunnerError(
-            StatusClass.MANIFEST_INVALID,
-            f"Sample {sample.sample_run_id} missing valid HTTPS query_fasta with SHA-256."
-        )
-
-    if not sample.truth_package:
-        raise VeritasRunnerError(
-            StatusClass.MANIFEST_INVALID,
-            f"Sample {sample.sample_run_id} missing truth_package definition."
-        )
-
-    found_roles = {
-        f.role for f in sample.truth_package.files 
-        if f.url.startswith("https://") and f.sha256
-    }
-    missing_roles = REQUIRED_TRUTH_ROLES - found_roles
-    if missing_roles:
-        raise VeritasRunnerError(
-            StatusClass.MANIFEST_INVALID,
-            f"Sample {sample.sample_run_id} truth_package missing role(s): {missing_roles}"
-        )
-
 
 # --- Network & API Operations ---
 

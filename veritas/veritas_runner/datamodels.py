@@ -1,6 +1,6 @@
-from typing import List, Optional
-from typing import Literal
-from pydantic import BaseModel, Field, model_validator
+from typing import List, Optional, Self, Literal, Dict
+from pydantic import BaseModel, Field, model_validator, field_validator
+
 
 class ManifestFile(BaseModel):
     role: str
@@ -8,12 +8,47 @@ class ManifestFile(BaseModel):
     sha256: str
     size: Optional[int] = None #TODO: check if always known upfront
 
+    @field_validator("sha256")
+    @classmethod
+    def check_sha256_hex(cls, v: str) -> str:
+        if len(v) != 64:
+            raise ValueError("sha256 string must be 64 characters long")
+        try:
+            bytes.fromhex(v)
+        except ValueError:
+            raise ValueError(f"invalid hex string: {v!r}")
+        return v.lower()
 
-class TruthPackage(BaseModel):
+    @field_validator("url")
+    @classmethod
+    def check_https(cls, v: str) -> str:
+        if not v.startswith("https://"):
+            raise ValueError(f"url must use HTTPS, got: {v!r}")
+        return v
+
+
+class TruthBundle(BaseModel):
     id: str
     version: str
-    truth_genome_sha256: Optional[str] = None  # ID/Hash for reference only, never downloaded
+    truth_genome_sha256: Optional[str] = None  # TODO: ID/Hash for reference only, never downloaded. Here is optional. Check.
     files: List[ManifestFile] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def check_required_roles_present(self) -> Self: #TODO require Python 3.11+
+        found_roles = {f.role for f in self.files}
+        required_truth_roles = {"reference_fasta", "truth_vcf", "truth_tbi", "rtg_sdf"} # TODO: low_cov.bed as requirement?
+        missing_roles = required_truth_roles - found_roles
+        
+        if missing_roles:
+            raise ValueError(
+                f"Truth bundle '{self.id}' is missing required role(s): {sorted(missing_roles)}"
+            )
+        return self
+
+    @property
+    def files_by_role(self) -> Dict[str, ManifestFile]:
+        """Maps all truth files into a dictionary by role"""
+        return {f.role: f for f in self.files}
 
 
 class ExecutorConfig(BaseModel):
@@ -22,14 +57,47 @@ class ExecutorConfig(BaseModel):
     parser_version: str
 
 
+class RegionAnnotations(BaseModel):
+    primer_bed: Optional[ManifestFile] = None
+    mask_bed: Optional[ManifestFile] = None
+    low_cov_truth_bed: Optional[ManifestFile] = None
+    low_cov_query_bed: Optional[ManifestFile] = None
+
+    @model_validator(mode="after")
+    def check_roles_match_fields(self) -> Self:
+        expected = {
+            "primer_bed": self.primer_bed, #TODO: Veritas uses primerd.bed. Correct Veritas.
+            "mask_bed": self.mask_bed,
+            "low_cov_truth_bed": self.low_cov_truth_bed,
+            "low_cov_query_bed": self.low_cov_query_bed,
+        }
+        for expected_role, file in expected.items():
+            if file is not None and file.role != expected_role:
+                raise ValueError(
+                    f"{expected_role} field has mismatched role: {file.role!r}"
+                )
+        return self
+
+
 class SampleInput(BaseModel):
     sample_run_id: str
     sample_order: int
     query_type: Literal["fasta", "vcf"]
-    truth_package: TruthPackage
+    truth_bundle: TruthBundle
     query_input: ManifestFile
+    region_annotations: Optional[RegionAnnotations] = None
 
+    @model_validator(mode="after")
+    def check_query_input_role_matches_type(self) -> Self:
+        expected_role = f"query_{self.query_type}"
+        if self.query_input.role != expected_role:
+            raise ValueError(
+                f"query_type is '{self.query_type}' but query_input.role is "
+                f"'{self.query_input.role}' (expected '{expected_role}')"
+            )
+        return self
 
+    
 class Manifest(BaseModel):
     schema_version: str
     attempt_id: str
@@ -39,17 +107,7 @@ class Manifest(BaseModel):
     executor: ExecutorConfig
     samples: List[SampleInput] = Field(default_factory=list)
 
-    @model_validator(mode="after")
-    def check_query_input_role_matches_type(self) -> "SampleInput":
-        expected_role = f"query_{self.query_type}"
-        if self.query_input.role != expected_role:
-            raise ValueError(
-                f"query_type is '{self.query_type}' but query_input.role is "
-                f"'{self.query_input.role}' (expected '{expected_role}')"
-            )
-        return self
-
-
+    
 class CallbackEnvelope(BaseModel):
     schema_version: str
     event_id: str
