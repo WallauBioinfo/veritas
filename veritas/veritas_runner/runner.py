@@ -3,8 +3,9 @@ import shutil
 import time
 import logging
 from typing import Optional
+import uuid
 
-from models import Manifest, CallbackEnvelope
+from datamodels import Manifest, CallbackEnvelope
 from client import (
     fetch_manifest, 
     download_file, 
@@ -26,6 +27,14 @@ def _validate_prerequisites(attempt_id: str, output_dir: str) -> None:
     """Validates local system configuration before making network requests."""
     if not attempt_id or not attempt_id.strip():
         raise VeritasRunnerError(StatusClass.MISSING_ATTEMPT_ID, "attempt_id is missing or empty.")
+
+    try:
+        uuid.UUID(attempt_id)
+    except ValueError:
+        raise VeritasRunnerError(
+            StatusClass.MISSING_ATTEMPT_ID,
+            f"attempt_id is not a valid UUID: {attempt_id!r}"
+        )
 
     if shutil.which("veritas") is None:
         raise VeritasRunnerError(StatusClass.CONFIG_ERROR, "'veritas' executable not found on PATH.")
