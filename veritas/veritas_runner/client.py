@@ -21,8 +21,8 @@ MAX_MANIFEST_SIZE_BYTES = 256 * 1024  # 256 KB limit per ADR-13 & SPEC-14
 
 def fetch_manifest(attempt_id: str) -> Manifest:
     """
-    Fetches the attempt manifest from PathoEQA, enforcing the full HTTP status taxonomy,
-    payload size boundaries, and schema validation rules.
+    Fetches the attempt manifest from PathoEQA, enforcing HTTP status code taxonomy,
+    payload size limits, and schema validation rules.
     """
     api_url = os.environ.get("PATHOEQA_API_URL", "").rstrip("/")
     url = f"{api_url}/attempts/{attempt_id}/manifest"
@@ -35,12 +35,6 @@ def fetch_manifest(attempt_id: str) -> Manifest:
         response.raise_for_status()
 
     except requests.exceptions.HTTPError as e:
-        if e.response is None:
-            raise VeritasRunnerError(
-                StatusClass.SERVER_UNAVAILABLE,
-                "PathoEQA endpoint failed to return an HTTP response."
-            )
-
         status_code = e.response.status_code
         
         if status_code in (404, 409):
@@ -69,11 +63,15 @@ def fetch_manifest(attempt_id: str) -> Manifest:
                 f"Unexpected HTTP status {status_code} fetching manifest."
             )
 
-    except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
-        # Pure transport failure / local network issue
+    except requests.exceptions.Timeout as e:
         raise VeritasRunnerError(
             StatusClass.SERVER_UNAVAILABLE,
-            f"Network transport error reaching PathoEQA endpoint: {e}"
+            "PathoEQA endpoint timed out during network request."
+        )
+    except requests.exceptions.ConnectionError as e:
+        raise VeritasRunnerError(
+            StatusClass.SERVER_UNAVAILABLE,
+            "Failed to establish network connection to PathoEQA endpoint."
         )
 
     # --- Payload Size Checks ---
@@ -114,78 +112,69 @@ def fetch_manifest(attempt_id: str) -> Manifest:
             f"Internal runner failure parsing manifest: {type(e).__name__}"
         )
 
-def download_file(url: str, dest_path: str, expected_sha256: str, expected_size: Optional[int] = None) -> None:
+def download_file(
+    url: str, 
+    dest_path: str, 
+    expected_sha256: str, 
+    expected_size: Optional[int] = None
+) -> None:
     """
-    Streams download to disk, computing SHA-256 and byte counts on the fly.
-    Enforces optional size limits during stream, mandatory byte count check,
-    and mandatory cryptographic SHA-256 verification on completion.
+    Streams a file download to disk, computing SHA-256 and byte counts on the fly.
+    Enforces optional size limits during streaming and mandatory SHA-256 verification.
     """
-    logger.info("Downloading file to %s", dest_path)
+    logger.info("Downloading asset to %s", dest_path)
     sha256_hash = hashlib.sha256()
     downloaded_bytes = 0
 
     try:
-        with requests.get(url, stream=True, timeout=30) as r:
-            r.raise_for_status()
+        with requests.get(url, stream=True, timeout=60) as response:
+            response.raise_for_status()
+            
             with open(dest_path, "wb") as f:
-                for chunk in r.iter_content(chunk_size=8192):
+                for chunk in response.iter_content(chunk_size=8192):
                     if chunk:
                         f.write(chunk)
                         sha256_hash.update(chunk)
                         downloaded_bytes += len(chunk)
 
+                        # Abort early if download exceeds expected size
                         if expected_size is not None and downloaded_bytes > expected_size:
                             raise VeritasRunnerError(
                                 StatusClass.DOWNLOAD_FAILED,
-                                f"Download stream exceeded expected size of {expected_size} bytes."
+                                f"Download stream exceeded expected size limit of {expected_size} bytes."
                             )
-    except requests.RequestException as e:
+
+    except requests.exceptions.HTTPError as e:
+        status_code = e.response.status_code
         raise VeritasRunnerError(
             StatusClass.DOWNLOAD_FAILED,
-            f"Network error downloading {dest_path}: {e}"
+            f"HTTP error {status_code} while downloading file."
+        )
+    except requests.exceptions.Timeout:
+        raise VeritasRunnerError(
+            StatusClass.DOWNLOAD_FAILED,
+            "Timed out while downloading asset file."
+        )
+    except requests.exceptions.RequestException:
+        raise VeritasRunnerError(
+            StatusClass.DOWNLOAD_FAILED,
+            "Network transport failure during asset download."
         )
 
-    # Optional strict size verification
+    # Size Verification
     if expected_size is not None and downloaded_bytes != expected_size:
         raise VeritasRunnerError(
             StatusClass.DOWNLOAD_FAILED,
             f"Size mismatch for {dest_path}: expected {expected_size} bytes, got {downloaded_bytes}."
         )
 
-    # Mandatory cryptographic SHA-256 verification
+    # Mandatory Cryptographic Integrity Check
     computed_sha256 = sha256_hash.hexdigest()
     if computed_sha256.lower() != expected_sha256.lower():
         raise VeritasRunnerError(
             StatusClass.CHECKSUM_MISMATCH,
-            f"SHA-256 mismatch for {dest_path}. Expected {expected_sha256}, got {computed_sha256}."
+            f"SHA-256 mismatch for asset. Expected {expected_sha256[:12]}..., got {computed_sha256[:12]}..."
         )
-
-
-# --- Callback Factory & Dispatcher ---
-
-def build_callback(
-    attempt_id: str,
-    workflow_run_id: int,
-    event_type: Literal[
-        "attempt_started", "attempt_completed", "attempt_partial", "attempt_failed",
-        "sample_started", "sample_completed", "sample_completed_with_warnings",
-        "sample_not_evaluable", "sample_failed",
-    ],
-    sample_run_id: Optional[str] = None,
-    payload: Optional[Dict[str, Any]] = None,
-) -> CallbackEnvelope:
-    """Factory function to build a validated CallbackEnvelope."""
-    return CallbackEnvelope(
-        schema_version="1.0",
-        event_id=str(uuid.uuid4()),
-        attempt_id=attempt_id,
-        workflow_run_id=workflow_run_id,
-        event_type=event_type,
-        occurred_at=datetime.now(timezone.utc).isoformat(),
-        sample_run_id=sample_run_id,
-        payload=payload or {},
-    )
-
 
 def send_callback(envelope: CallbackEnvelope) -> None:
     """Dispatches a CallbackEnvelope event payload back to PathoEQA."""
