@@ -1,42 +1,80 @@
+"""
+Single source of truth for the runner's failure taxonomy.
+
+Previously `action_status.py`; the module is now `status.py` and every other
+module imports `StatusClass` from here. Nothing else in the package may invent
+a failure string: if a condition is not in this enum, it is INTERNAL_ERROR.
+"""
+
 from enum import Enum
 
 
 class StatusClass(str, Enum):
+    """
+    Failure taxonomy for one ExecutionAttempt.
+
+    Naming note: the specs use "tentativa" in two unrelated senses.
+    - "nova tentativa" / "tentativa sem callback" = the ExecutionAttempt entity
+      (carries attempt_id, owned by PathoEQA, terminal state is immutable).
+    - "no máximo duas tentativas automáticas" = automatic *retries* of a single
+      transient operation. This is request-level and owned by the runner.
+    `transient` below refers to the second sense only: whether the runner may
+    re-issue the same HTTP request in-process. It never implies re-dispatching
+    the attempt — only PathoEQA mints a new attempt_id.
+    """
+
     SUCCESS = "success"
 
-    # Phase 1 — not retryable, caller/PathoEQA needs to fix the request.
+    # Phase 1 - preflight: resolving attempt_id, auth, manifest, downloading inputs.
+    # Caller/attempt-data problem - PathoEQA must fix the request; no retry helps.
     INVALID_INPUT = "invalid_input"
     ATTEMPT_NOT_FOUND = "attempt_not_found"
     AUTH_REJECTED = "auth_rejected"
     MANIFEST_INVALID = "manifest_invalid"
+    SCIENTIFIC_INCOMPATIBILITY = "scientific_incompatibility"
 
-    # Phase 1 — transient, safe to re-dispatch the whole attempt.
+    # Phase 1 - transient infrastructure. Eligible for in-process retry.
     UPSTREAM_UNAVAILABLE = "upstream_unavailable"
-    FETCH_FAILED = "fetch_failed"
+    DOWNLOAD_FAILED = "download_failed"
 
-    # Our own environment is broken — not retryable, needs a maintainer, not a re-dispatch.
+    # Integrity - the bytes arrived but are wrong or unusable. Never retried:
+    # the frozen input or the recorded hash is wrong, and both need a human.
+    CHECKSUM_MISMATCH = "checksum_mismatch"
+    ARTEFACT_INVALID = "artefact_invalid"  # correct bytes, unusable shape (bad tar, empty SDF)
+
+    # Our own environment is broken - needs a maintainer, not a re-dispatch.
     CONFIG_ERROR = "config_error"
 
-    # Phase 2 — execution supervision (wrapping the veritas subprocess).
-    TIMEOUT = "timeout"
+    # Phase 2 - execution supervision (wrapping the veritas subprocess).
+    TIMEOUT = "processing_timeout"
+    DEADLINE_EXCEEDED = "deadline_exceeded"
     VERITAS_CRASHED = "veritas_crashed"
 
-    # Phase 3 — callback: veritas ran to completion, this is about delivering results.
-    # Format only — never a judgment on the quality of the analysis itself.
-    OUTPUT_INVALID = "output_invalid"
+    # Phase 3 - delivery. Format only, never a judgment on the analysis itself.
+    OUTPUT_INVALID = "output_invalid"  # veritas exited 0 but wrote unreadable/absent results
+    METRICS_MISSING = "metrics_missing"
+    CALLBACK_INVALID = "callback_invalid"
     CALLBACK_FAILED = "callback_failed"
 
-    # Genuinely unanticipated.
     INTERNAL_ERROR = "internal_error"
 
     @property
-    def retryable(self) -> bool:
-        """Safe to re-dispatch the entire attempt from scratch."""
+    def transient(self) -> bool:
+        """
+        True when re-issuing the *same request* may succeed without any state
+        change upstream. Drives the in-process retry helper (max 2 extra tries).
+        Says nothing about whether the ExecutionAttempt should be re-dispatched.
+        """
         return self in {
             StatusClass.UPSTREAM_UNAVAILABLE,
-            StatusClass.FETCH_FAILED,
-            StatusClass.TIMEOUT,
+            StatusClass.DOWNLOAD_FAILED,
+            StatusClass.CALLBACK_FAILED,
         }
+
+    @property
+    def terminal_state(self) -> str:
+        """PathoEQA-facing ExecutionAttempt state for this class."""
+        return "Completed" if self is StatusClass.SUCCESS else "Failed"
 
     @property
     def exit_code(self) -> int:
@@ -47,14 +85,27 @@ class StatusClass(str, Enum):
             StatusClass.ATTEMPT_NOT_FOUND,
             StatusClass.AUTH_REJECTED,
             StatusClass.MANIFEST_INVALID,
+            StatusClass.SCIENTIFIC_INCOMPATIBILITY,
         }:
             return 10  # caller/attempt-data problem
         if self is StatusClass.CONFIG_ERROR:
-            return 20  # our environment — alert, don't retry
-        if self.retryable:
-            return 30  # transient — safe to re-dispatch
+            return 20  # our environment - alert, do not re-dispatch
+        if self in {
+            StatusClass.UPSTREAM_UNAVAILABLE,
+            StatusClass.DOWNLOAD_FAILED,
+        }:
+            return 30  # transient, already retried in-process and still failing
+        if self in {StatusClass.CHECKSUM_MISMATCH, StatusClass.ARTEFACT_INVALID}:
+            return 35  # integrity - frozen input or recorded hash is wrong
+        if self in {StatusClass.TIMEOUT, StatusClass.DEADLINE_EXCEEDED}:
+            return 38  # ran out of budget - continuation, not retry
         if self is StatusClass.VERITAS_CRASHED:
-            return 40  # died mid-run, cause unknown — investigate
-        if self in {StatusClass.OUTPUT_INVALID, StatusClass.CALLBACK_FAILED}:
-            return 50  # ran to completion, delivery problem — results may exist on disk
-        return 60  # StatusClass.INTERNAL_ERROR and anything unclassified
+            return 40  # died mid-run, cause unknown - investigate
+        if self in {
+            StatusClass.OUTPUT_INVALID,
+            StatusClass.METRICS_MISSING,
+            StatusClass.CALLBACK_INVALID,
+            StatusClass.CALLBACK_FAILED,
+        }:
+            return 50  # completed, delivery problem - results may exist on disk
+        return 60  # INTERNAL_ERROR and anything unclassified

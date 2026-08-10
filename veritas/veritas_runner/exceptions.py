@@ -1,13 +1,39 @@
 # veritas/exceptions.py
 
-from veritas.status import StatusClass
+from veritas_runner.status import StatusClass
 
 class VeritasRunnerError(Exception):
     """Base exception for all expected Veritas runner failures."""
-    def __init__(self, status_class: StatusClass, message: str):
+
+    def __init__(
+        self,
+        status_class: StatusClass,
+        message: str,
+        attempt_id: Optional[str] = None,
+        attempt_number: Optional[int] = None,  # 1, 2, or 3
+    ):
         self.status_class = status_class
         self.message = message
-        super().__init__(f"[{status_class.value}] {message}")
+        self.attempt_id = attempt_id
+        self.attempt_number = attempt_number
+
+        # Format clean log representation
+        ctx = []
+        if attempt_id:
+            ctx.append(f"attempt_id={attempt_id}")
+        if attempt_number:
+            ctx.append(f"try={attempt_number}/3")
+            
+        prefix = f" [{', '.join(ctx)}]" if ctx else ""
+        super().__init__(f"{message}{prefix}")
+
+    @property
+    def is_retryable(self) -> bool:
+        """Determines if the error warrants consuming another retry attempt."""
+        return self.status_class in {
+            StatusClass.SERVER_UNAVAILABLE,
+            StatusClass.UNKNOWN_HTTP_ERROR,
+        }
 
 
 def raise_for_http_status(status_code: int, context_id: str) -> None:
