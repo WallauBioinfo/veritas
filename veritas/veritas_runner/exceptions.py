@@ -1,3 +1,12 @@
+# veritas_runner/exceptions.py
+#
+# Centralised error mapping for the package.
+#
+# Three things live here, and nothing else:
+#   1. VeritasRunnerError - Exception type the runner raises on purpose.
+#   2. http_failure_class() - HTTP status becomes a StatusClass.
+#   3. ErrorFactory - context binding (attempt_id / sample_run_id / role) 
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -6,23 +15,19 @@ from typing import Any, Optional
 
 from veritas_runner.status import StatusClass
 
-# Long subprocess stderr / validation dumps must not blow up a callback body.
 MAX_DETAIL_CHARS = 2000
 
 
 class VeritasRunnerError(Exception):
     """
-    A classified runner failure.
+    A classified Veritas runner failure.
 
     Attributes
     ----------
     failure_class : StatusClass
-        Drives the callback payload, the ExecutionAttempt terminal state and
-        the process exit code. Never invent a string outside the enum.
+        Drives the callback payload, the ExecutionAttempt terminal state and the process exit code.
     attempt_id : str | None
-        The ExecutionAttempt this failure belongs to. Set for control-plane and
-        artefact errors; often unset for pure-local errors, which runner.py
-        backfills via `.scoped()` before reporting.
+        The ExecutionAttempt this failure belongs to.
     sample_run_id : str | None
         Set only when the failure is scoped to one sample, so a per-sample
         failure is never reported as an attempt-wide one.
@@ -48,22 +53,16 @@ class VeritasRunnerError(Exception):
         super().__init__(f"{message} [{', '.join(ctx)}]")
 
     # ------------------------------------------------------------- properties
-    # All three delegate to StatusClass. Duplicating any of this here is how a
-    # second, contradictory authority on retryability gets born.
-
     @property
     def exit_code(self) -> int:
-        """Passthrough so the CLI never reaches into the enum itself."""
         return self.failure_class.exit_code
 
     @property
     def terminal_state(self) -> str:
-        """PathoEQA-facing ExecutionAttempt state implied by this failure."""
         return self.failure_class.terminal_state
 
     @property
     def transient(self) -> bool:
-        """Whether retry.py may re-issue the same request. Enum decides, not us."""
         return self.failure_class.transient
 
     # ---------------------------------------------------------- constructors
@@ -77,15 +76,9 @@ class VeritasRunnerError(Exception):
         context: str = "",
         attempt_id: Optional[str] = None,
         sample_run_id: Optional[str] = None,
-    ) -> "VeritasRunnerError":
+    ) -> VeritasRunnerError:
         """
-        Turn an unclassified exception into a classified one without losing the
-        cause. Use at catch-all boundaries:
-
-            except VeritasRunnerError:
-                raise
-            except Exception as e:
-                raise VeritasRunnerError.wrap(e, context="unpacking SDF") from e
+        Wrap a raw `BaseException` into custom failure classes, keeping the original one-liner summary message of the exception.
         """
         where = f"{context}: " if context else ""
         return cls(
@@ -93,24 +86,6 @@ class VeritasRunnerError(Exception):
             message=f"{where}{type(exc).__name__}: {exc}",
             attempt_id=attempt_id,
             sample_run_id=sample_run_id,
-        )
-
-    def scoped(
-        self,
-        *,
-        attempt_id: Optional[str] = None,
-        sample_run_id: Optional[str] = None,
-    ) -> "VeritasRunnerError":
-        """
-        Return the same failure with identifiers filled in. Lets a low-level
-        helper raise without knowing the attempt, and the orchestrator attach
-        the ids on the way out instead of rewriting the message.
-        """
-        return VeritasRunnerError(
-            failure_class=self.failure_class,
-            message=self.message,
-            attempt_id=attempt_id or self.attempt_id,
-            sample_run_id=sample_run_id or self.sample_run_id,
         )
 
     # ------------------------------------------------------------- reporting
@@ -159,8 +134,6 @@ def http_failure_class(status_code: int, surface: HttpSurface) -> Optional[Statu
     retryable = status_code in _RETRYABLE_CODES or status_code >= 500
 
     if surface is HttpSurface.CALLBACK:
-        # 409 = attempt already terminal, 422 = payload rejected. Both are
-        # final answers: re-posting the same body cannot change them.
         if status_code in (409, 422):
             return StatusClass.CALLBACK_INVALID
         if status_code in (401, 403):
@@ -170,8 +143,6 @@ def http_failure_class(status_code: int, surface: HttpSurface) -> Optional[Statu
         return StatusClass.CALLBACK_FAILED if retryable else StatusClass.CALLBACK_INVALID
 
     if surface is HttpSurface.ARTEFACT:
-        # Signed URLs: 401/403 usually means the signature expired, not that our
-        # OIDC token is bad - still not retryable, the manifest must be reissued.
         if status_code in (401, 403, 404, 410):
             return StatusClass.ARTEFACT_INVALID
         return StatusClass.DOWNLOAD_FAILED if retryable else StatusClass.ARTEFACT_INVALID
@@ -194,13 +165,13 @@ def http_failure_class(status_code: int, surface: HttpSurface) -> Optional[Statu
 @dataclass(frozen=True)
 class ErrorFactory:
     """
-    Pre-bound error constructor. Replaces the mixin: hold one as an attribute
-    (`self.fail = ErrorFactory(attempt_id=...)`) or pass one into a free
-    function - both work, whereas a mixin only works via inheritance.
+    Pre-bound error constructor. Hold one as an attribute
+    (`self._error = ErrorFactory(attempt_id=...)`) or pass one into a free
+    function.
 
         fail = ErrorFactory(attempt_id=attempt_id, prefix=f"role={role}")
         raise fail(StatusClass.CHECKSUM_MISMATCH, "sha256 does not match")
-        fail.for_http(response.status_code, HttpSurface.ARTEFACT)  # raises or returns
+        fail.raise_for_http(response.status_code, HttpSurface.ARTEFACT)
     """
 
     attempt_id: Optional[str] = None
@@ -216,15 +187,21 @@ class ErrorFactory:
             sample_run_id=self.sample_run_id,
         )
 
-    def bind(self, **overrides: Any) -> "ErrorFactory":
-        """Narrow the context, e.g. `client.fail.bind(sample_run_id=sr.id)`."""
+    def bind(
+        self,
+        *,
+        attempt_id: Optional[str] = None,
+        sample_run_id: Optional[str] = None,
+        prefix: Optional[str] = None,
+    ) -> "ErrorFactory":
+        """Narrow the context, e.g. `client._error.bind(sample_run_id=sr.id)`."""
         return ErrorFactory(
-            attempt_id=overrides.get("attempt_id", self.attempt_id),
-            sample_run_id=overrides.get("sample_run_id", self.sample_run_id),
-            prefix=overrides.get("prefix", self.prefix),
+            attempt_id=attempt_id if attempt_id is not None else self.attempt_id,
+            sample_run_id=sample_run_id if sample_run_id is not None else self.sample_run_id,
+            prefix=prefix if prefix is not None else self.prefix,
         )
 
-    def for_http(
+    def raise_for_http(
         self,
         status_code: int,
         surface: HttpSurface,

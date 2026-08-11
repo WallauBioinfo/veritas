@@ -14,7 +14,7 @@ import requests
 from pydantic import ValidationError
 
 from veritas_runner.datamodels import CallbackEnvelope, Manifest
-from veritas_runner.exceptions import VeritasRunnerError, ErrorFactory
+from veritas_runner.exceptions import VeritasRunnerError, ErrorFactory, HttpSurface
 from veritas_runner.status import StatusClass
 
 logger = logging.getLogger(__name__)
@@ -220,7 +220,7 @@ class PathoEQAClient:
                 f"Callback transport failure: {type(e).__name__}",
             ) from e
 
-        self.fail.raise_for_http(
+        self._error.raise_for_http(
             response.status_code,
             HttpSurface.CALLBACK,
             context="status callback"

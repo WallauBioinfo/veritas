@@ -129,3 +129,9 @@ class CallbackEnvelope(BaseModel):
         if self.event_type.startswith("attempt_") and self.sample_run_id is not None:
             raise ValueError(f"sample_run_id must be None for event_type '{self.event_type}'")
         return self
+
+class CallbackPayload(BaseModel):
+    """Inner payload for reporting failure."""
+    failure_class: str
+    detail: str
+    duration_seconds: Optional[float] = None
