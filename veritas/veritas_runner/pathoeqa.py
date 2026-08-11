@@ -14,7 +14,7 @@ import requests
 from pydantic import ValidationError
 
 from veritas_runner.datamodels import CallbackEnvelope, Manifest
-from veritas_runner.exceptions import VeritasRunnerError
+from veritas_runner.exceptions import VeritasRunnerError, ErrorFactory
 from veritas_runner.status import StatusClass
 
 logger = logging.getLogger(__name__)
@@ -70,6 +70,7 @@ class PathoEQAClient:
     ) -> None:
         self.api_url = api_url.rstrip("/")
         self.attempt_id = attempt_id
+        self._error = ErrorFactory(attempt_id=attempt_id)
         self.session = session or requests.Session()
         self.session.headers.update(
             {
@@ -104,7 +105,11 @@ class PathoEQAClient:
                 url,
                 timeout=(CONNECT_TIMEOUT_S, READ_TIMEOUT_S),
             )
-            self._raise_for_status(response.status_code)
+            self._error.raise_for_http(
+                response.status_code,
+                HttpSurface.CONTROL_PLANE,
+                context="manifest fetch"
+            )
             
             raw_bytes = response.content
             if len(raw_bytes) > MAX_MANIFEST_BYTES:
@@ -215,47 +220,13 @@ class PathoEQAClient:
                 f"Callback transport failure: {type(e).__name__}",
             ) from e
 
-        if response.status_code in (409, 422):
-            # PathoEQA rejected the shape, or the attempt is already terminal.
-            # Not transient - retrying cannot change the answer.
-            raise self._error(
-                StatusClass.CALLBACK_INVALID,
-                f"PathoEQA rejected callback with HTTP {response.status_code}.",
-            )
-        if response.status_code >= 400:
-            raise self._error(
-                StatusClass.CALLBACK_FAILED,
-                f"Callback rejected with HTTP {response.status_code}.",
-            )
-
-    # ----------------------------------------------------------------- helpers
-
-    def _error(self, failure_class: StatusClass, message: str) -> VeritasRunnerError:
-        return VeritasRunnerError(
-            failure_class=failure_class, message=message, attempt_id=self.attempt_id
+        self.fail.raise_for_http(
+            response.status_code,
+            HttpSurface.CALLBACK,
+            context="status callback"
         )
 
-    def _raise_for_status(self, status_code: int) -> None:
-        if status_code < 400:
-            return
-        if status_code in (401, 403):
-            raise self._error(
-                StatusClass.AUTH_REJECTED,
-                f"PathoEQA rejected the OIDC token (HTTP {status_code}).",
-            )
-        if status_code == 404:
-            raise self._error(
-                StatusClass.ATTEMPT_NOT_FOUND,
-                "PathoEQA has no such attempt (HTTP 404).",
-            )
-        if status_code in (408, 429) or status_code >= 500:
-            raise self._error(
-                StatusClass.UPSTREAM_UNAVAILABLE,
-                f"PathoEQA is unavailable (HTTP {status_code}).",
-            )
-        raise self._error(
-            StatusClass.INVALID_INPUT, f"PathoEQA returned HTTP {status_code}."
-        )
+    # ----------------------------------------------------------------- connectors
 
     def close(self) -> None:
         """Closes the underlying requests HTTP session."""
