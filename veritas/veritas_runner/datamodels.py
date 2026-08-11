@@ -121,3 +121,11 @@ class CallbackEnvelope(BaseModel):
     occurred_at: str
     sample_run_id: Optional[str] = None
     payload: dict = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_sample_run_id(self) -> Self:
+        if self.event_type.startswith("sample_") and not self.sample_run_id:
+            raise ValueError(f"sample_run_id is required for event_type '{self.event_type}'")
+        if self.event_type.startswith("attempt_") and self.sample_run_id is not None:
+            raise ValueError(f"sample_run_id must be None for event_type '{self.event_type}'")
+        return self

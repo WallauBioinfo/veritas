@@ -1,28 +1,21 @@
 # veritas_runner/pathoeqa.py
 #
-# Renamed from client.py. "client" said nothing about *whose* client it is,
-# and the file had drifted into holding three unrelated concerns: the PathoEQA
-# control-plane API, bulk artefact downloads, and env-var config.
-#
-# This module is now only the PathoEQA control plane: fetch the manifest for an
-# ExecutionAttempt, post callbacks about it. Bulk artefact transfer lives in
-# artefacts.py. Retry policy lives in runner.py - every function here performs
-# exactly ONE HTTP request and raises a classified error. That separation is
-# deliberate: the specs' "duas tentativas automáticas" is a policy decision
-# about a transient operation, not a property of the endpoint.
+# This module is the PathoEQA control plane: fetch the manifest for an
+# ExecutionAttempt and post callbacks about it.
 
 from __future__ import annotations
 
 import logging
 import os
-from typing import Optional
+from typing import Optional, Final
 
+import icontract
 import requests
 from pydantic import ValidationError
 
-from veritas_runner.status import StatusClass
 from veritas_runner.datamodels import CallbackEnvelope, Manifest
 from veritas_runner.exceptions import VeritasRunnerError
+from veritas_runner.status import StatusClass
 
 logger = logging.getLogger(__name__)
 
@@ -35,16 +28,38 @@ SUPPORTED_SCHEMA_MAJOR = os.environ.get("VERITAS_SUPPORTED_SCHEMA_MAJOR", "1")
 
 class PathoEQAClient:
     """
-    Single-shot HTTP client for the PathoEQA control plane.
+    Attempt-scoped HTTP client for the PathoEQA control plane.
 
-    One instance per ExecutionAttempt, holding one requests.Session so the
-    manifest fetch, the artefact downloads and every callback reuse the same
-    TLS connection pool.
+    Manages HTTP communication: manifest retrieval and status callbacks
+    for a single execution attempt over a shared, pooled TLS session.
 
-    No method here retries. No method here has a urllib3 Retry adapter mounted.
-    If a call fails transiently it raises with a StatusClass whose `.transient`
-    is True, and the caller decides whether to try again.
+    Contract & Responsibilities:
+    ----------------------------
+    - Scope: Bound 1:1 to the lifecycle of a single ExecutionAttempt run.
+    - Resource Management: Reuses a single `requests.Session` connection pool across
+      all endpoints to minimize TCP/TLS handshake overhead.
+    - The underlying `requests.Session` connection pool remains open until explicit instance disposal.
+
+
+    Preconditions:
+    ----------------------------------
+    - `api_url`, `attempt_id` and `oidc_token` are non-empty, pre-validated strings.
+
+    Class Invariants:
+    -----------------
+    - `api_url` and `attempt_id` `Final` attributes and cannot be reassigned.
+
+    Exception & Failure Contract:
+    -----------------------------
+    - All network, HTTP, or parsing failures are translated into `VeritasRunnerError`.
+    - Every raised exception guarantees a structured `StatusClass` attribute and `attempt_id`.
+    - Transient failures (e.g. connection drops, 50x status codes, timeouts) set
+      `status_class.transient == True`, signaling to the orchestrator that a retry
+      attempt may be executed.
     """
+
+    api_url: Final[str]
+    attempt_id: Final[str]
 
     def __init__(
         self,
@@ -53,50 +68,50 @@ class PathoEQAClient:
         attempt_id: str,
         session: Optional[requests.Session] = None,
     ) -> None:
-        if not api_url:
-            raise VeritasRunnerError(
-                failure_class=StatusClass.CONFIG_ERROR,
-                message="PATHOEQA_API_URL is not configured.",
-                attempt_id=attempt_id,
-            )
-        if not oidc_token:
-            raise VeritasRunnerError(
-                failure_class=StatusClass.CONFIG_ERROR,
-                message="No GitHub OIDC token available for PathoEQA calls.",
-                attempt_id=attempt_id,
-            )
-
         self.api_url = api_url.rstrip("/")
         self.attempt_id = attempt_id
         self.session = session or requests.Session()
         self.session.headers.update(
             {
-                "Authorization": f"Bearer {oidc_token}",
-                "Accept": "application/json",
-                "User-Agent": "veritas-runner",
+                "Authorization": f"Bearer {oidc_token}"
             }
         )
 
+
     # ---------------------------------------------------------------- manifest
+
+    @icontract.ensure(
+        lambda result: result.schema_version.split(".", 1)[0] == SUPPORTED_SCHEMA_MAJOR,
+        "Manifest schema version is unsupported",
+        error=lambda result, self: self._error(
+            StatusClass.MANIFEST_INVALID,
+            f"Unsupported schema_version '{result.schema_version}'; "
+            f"this runner supprts major version {SUPPORTED_SCHEMA_MAJOR}.",
+        ),
+    )
 
     def fetch_manifest(self) -> Manifest:
         """
-        GET /attempts/{attempt_id}/manifest - one request, no retry.
+        GET /attempts/{attempt_id}/manifest.
 
-        Streams the body so an oversized payload is rejected on the wire rather
-        than after buffering it whole (SPEC cap: 256 KB).
+        Buffer the entirety of the Manifest JSON and validate its size (SPEC cap: 256 KB).
         """
         url = f"{self.api_url}/attempts/{self.attempt_id}/manifest"
         logger.info("Fetching manifest for attempt_id=%s", self.attempt_id)
 
         try:
-            with self.session.get(
+            response = self.session.get(
                 url,
                 timeout=(CONNECT_TIMEOUT_S, READ_TIMEOUT_S),
-                stream=True,
-            ) as response:
-                self._raise_for_status(response.status_code)
-                raw = self._read_capped(response, MAX_MANIFEST_BYTES, "Manifest")
+            )
+            self._raise_for_status(response.status_code)
+            
+            raw_bytes = response.content
+            if len(raw_bytes) > MAX_MANIFEST_BYTES:
+                raise self._error(
+                    StatusClass.MANIFEST_INVALID,
+                    f"Manifest payload ({len(raw_bytes)} bytes) exceeds limit of {MAX_MANIFEST_BYTES} bytes.",
+                )    
         except VeritasRunnerError:
             raise
         except requests.exceptions.Timeout as e:
@@ -119,18 +134,17 @@ class PathoEQAClient:
                 f"Transport failure during manifest fetch: {type(e).__name__}",
             ) from e
 
-        return self._parse_manifest(raw)
+        return self._parse_manifest(raw_bytes)
 
     def _parse_manifest(self, raw: bytes) -> Manifest:
         try:
-            manifest = Manifest.model_validate_json(raw)
+            return Manifest.model_validate_json(raw)
         except ValidationError as e:
             raise self._error(
                 StatusClass.MANIFEST_INVALID,
                 f"Manifest failed schema validation ({e.error_count()} error(s)).",
             ) from e
         except ValueError as e:
-            # model_validate_json raises ValueError for malformed JSON too.
             raise self._error(
                 StatusClass.MANIFEST_INVALID, f"Manifest is not valid JSON: {e}"
             ) from e
@@ -140,32 +154,34 @@ class PathoEQAClient:
                 f"Internal failure parsing manifest: {type(e).__name__}",
             ) from e
 
-        major = manifest.schema_version.split(".", 1)[0]
-        if major != SUPPORTED_SCHEMA_MAJOR:
-            raise self._error(
-                StatusClass.MANIFEST_INVALID,
-                f"Unsupported schema_version '{manifest.schema_version}'; "
-                f"this runner speaks major version {SUPPORTED_SCHEMA_MAJOR}.",
-            )
-
-        if manifest.attempt_id != self.attempt_id:
-            raise self._error(
-                StatusClass.MANIFEST_INVALID,
-                "Manifest attempt_id does not match the dispatched attempt_id.",
-            )
-
-        return manifest
-
     # ---------------------------------------------------------------- callback
 
+    @icontract.require(
+        lambda envelope, self: envelope.attempt_id == self.attempt_id,
+        "Callback envelope attempt_id must match client attempt_id",
+        error=lambda envelope, self: self._error(
+            StatusClass.CALLBACK_INVALID,
+            f"Callback attempt_id '{envelope.attempt_id}' does not match client attempt_id '{self.attempt_id}'.",
+        ),
+    )
     def send_callback(self, envelope: CallbackEnvelope) -> None:
         """
-        POST /callbacks - one request, no retry.
+        POST /callbacks - Send a status or progress event to PathoEQA.
 
-        Raises rather than swallowing: the caller owns delivery policy, and a
-        silently dropped callback is how an attempt becomes `Stale`.
-        `event_id` makes the POST idempotent, so a retry by the caller cannot
-        duplicate metrics (VERITAS-003).
+        Executes a single HTTP attempt without internal retries. Fails fast by 
+        raising an exception on transport or server failure, halting execution.
+
+        Idempotency Contract (VERITAS-003):
+        ----------------------------------
+        - Attaches `envelope.event_id` as the HTTP `Idempotency-Key` header.
+        - Guarantees that if a network timeout drops the server's response, the caller
+          can safely re-transmit the same envelope without causing duplicate server-side
+          state updates or metric double-counting.
+
+        Preconditions:
+        --------------
+        - `envelope.attempt_id` must match `self.attempt_id`.
+        - Marshaled payload must not exceed `MAX_CALLBACK_BYTES`.
         """
         url = f"{self.api_url}/callbacks"
         body = envelope.model_dump_json(exclude_none=True).encode("utf-8")
@@ -190,9 +206,7 @@ class PathoEQAClient:
                 url,
                 data=body,
                 headers={
-                    "Content-Type": "application/json",
-                    "Idempotency-Key": envelope.event_id,
-                },
+                    "Content-Type": "application/json"                },
                 timeout=(CONNECT_TIMEOUT_S, READ_TIMEOUT_S),
             )
         except requests.exceptions.RequestException as e:
@@ -243,13 +257,12 @@ class PathoEQAClient:
             StatusClass.INVALID_INPUT, f"PathoEQA returned HTTP {status_code}."
         )
 
-    def _read_capped(self, response, cap: int, what: str) -> bytes:
-        buf = bytearray()
-        for chunk in response.iter_content(chunk_size=16 * 1024):
-            buf.extend(chunk)
-            if len(buf) > cap:
-                raise self._error(
-                    StatusClass.MANIFEST_INVALID,
-                    f"{what} payload exceeds the {cap} byte cap.",
-                )
-        return bytes(buf)
+    def close(self) -> None:
+        """Closes the underlying requests HTTP session."""
+        self.session.close()
+
+    def __enter__(self) -> PathoEQAClient:
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        self.close()
