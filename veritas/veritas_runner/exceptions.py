@@ -14,8 +14,10 @@ from enum import Enum
 from typing import Any, Optional
 
 from veritas_runner.status import StatusClass
+from veritas_runner.datamodels import CallbackPayload
 
 MAX_DETAIL_CHARS = 2000
+_RETRYABLE_CODES = frozenset[int]({408, 425, 429, 500, 502, 503, 504})
 
 
 class VeritasRunnerError(Exception):
@@ -65,8 +67,6 @@ class VeritasRunnerError(Exception):
     def transient(self) -> bool:
         return self.failure_class.transient
 
-    # ---------------------------------------------------------- constructors
-
     @classmethod
     def wrap(
         cls,
@@ -88,38 +88,31 @@ class VeritasRunnerError(Exception):
             sample_run_id=sample_run_id,
         )
 
-    # ------------------------------------------------------------- reporting
-
-    def as_callback_detail(self) -> dict[str, Any]:
-        """Failure fields merged into the callback envelope posted to PathoEQA."""
-        payload: dict[str, Any] = {
-            "failure_class": self.failure_class.value,
-            "detail": self.message[:MAX_DETAIL_CHARS],
-        }
-        if self.sample_run_id:
-            payload["sample_run_id"] = self.sample_run_id
-        return payload
-
-
-# ---------------------------------------------------------------------------
-# HTTP status -> StatusClass
-# ---------------------------------------------------------------------------
-#
-# The same status code means different things depending on which call failed,
-# so the mapping is parameterised by surface instead of being copy-pasted per
-# caller. Example: a 404 fetching the manifest is ATTEMPT_NOT_FOUND (PathoEQA
-# does not know this attempt); a 404 on a signed artefact URL is a dead/expired
-# link, i.e. DOWNLOAD_FAILED; a 404 on a callback is a broken callback_url,
-# which is CALLBACK_INVALID and must never be retried into the void.
+    def as_callback_payload(
+        self,
+        *,
+        duration_s: Optional[float] = None,
+    ) -> CallbackPayload:
+        """Constructs a structured CallbackPayload model for failure callbacks."""
+        return CallbackPayload(
+            failure_class=self.failure_class.value,
+            detail=self.message[:MAX_DETAIL_CHARS],
+            duration_seconds=round(duration_s, 3) if duration_s is not None else None,
+        )
 
 
 class HttpSurface(str, Enum):
-    CONTROL_PLANE = "control_plane"  # PathoEQA manifest / attempt reads
-    ARTEFACT = "artefact"  # signed object-storage downloads
-    CALLBACK = "callback"  # status posts back to PathoEQA
+    """
+    Identifies the HTTP network surface where an operation or failure occurred:
+    
+    - CONTROL_PLANE: API endpoints for manifests, tokens, and attempt reads.
+    - ARTEFACT: Signed object storage (S3/GCS) downloads for sample files.
+    - CALLBACK: Status webhook posts back to PathoEQA.
+    """
 
-
-_RETRYABLE_CODES = frozenset({408, 425, 429, 500, 502, 503, 504})
+    CONTROL_PLANE = "control_plane"
+    ARTEFACT = "artefact"
+    CALLBACK = "callback"
 
 
 def http_failure_class(status_code: int, surface: HttpSurface) -> Optional[StatusClass]:
