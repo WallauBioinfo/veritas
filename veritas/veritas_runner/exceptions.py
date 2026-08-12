@@ -11,29 +11,39 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Optional
+from typing import ClassVar, Optional
 
 from veritas_runner.status import StatusClass
 from veritas_runner.datamodels import CallbackPayload
 
-MAX_DETAIL_CHARS = 2000
 _RETRYABLE_CODES = frozenset[int]({408, 425, 429, 500, 502, 503, 504})
 
 
 class VeritasRunnerError(Exception):
     """
-    A classified Veritas runner failure.
+    Encapsulates error context and maps exceptions to standardized
+    failure categories, process exit codes, and callback payload content.
+
+    Class Attributes
+    ----------------
+    max_detail_chars : int
+        Maximum character length (2000) for the error detail string in callback 
+        payloads.
 
     Attributes
     ----------
     failure_class : StatusClass
-        Drives the callback payload, the ExecutionAttempt terminal state and the process exit code.
+        Custom failure category driving process exit codes, terminal states,
+        and callback failure types.
+    message : str
+        Human-readable summary description of the error.
     attempt_id : str | None
-        The ExecutionAttempt this failure belongs to.
+        Identifier for the associated ExecutionAttempt, if set.
     sample_run_id : str | None
-        Set only when the failure is scoped to one sample, so a per-sample
-        failure is never reported as an attempt-wide one.
+        Identifier for the specific sample run when the failure is sample-scoped.
     """
+
+    max_detail_chars: ClassVar[int] = 2000
 
     def __init__(
         self,
@@ -54,7 +64,6 @@ class VeritasRunnerError(Exception):
             ctx.append(f"sample_run_id={sample_run_id}")
         super().__init__(f"{message} [{', '.join(ctx)}]")
 
-    # ------------------------------------------------------------- properties
     @property
     def exit_code(self) -> int:
         return self.failure_class.exit_code
@@ -66,6 +75,10 @@ class VeritasRunnerError(Exception):
     @property
     def transient(self) -> bool:
         return self.failure_class.transient
+
+    @classmethod
+    def get_max_chars(cls):
+        return cls.max_detail_chars
 
     @classmethod
     def wrap(
