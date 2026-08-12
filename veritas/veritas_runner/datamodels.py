@@ -1,4 +1,5 @@
-from typing import List, Optional, Self, Literal, Dict
+from typing import Any, List, Optional, Self, Literal, Dict
+from pandas.core.arrays.arrow.accessors import ListAccessor
 from pydantic import BaseModel, Field, model_validator, field_validator
 
 
@@ -107,6 +108,25 @@ class Manifest(BaseModel):
     executor: ExecutorConfig
     samples: List[SampleInput] = Field(default_factory=list)
 
+    @model_validator(mode="after")
+    def check_at_least_one_sample(self) -> Self:
+        if not self.samples:
+            raise ValueError("Manifest must contain at least one sample")
+        return self
+
+    @model_validator(mode="after")
+    def check_samples_are_unique(self) -> Self:
+        run_ids: List[str] = [s.sample_run_id for s in self.samples]
+        dupes = [r for r in set(run_ids) if run_ids.count(r) > 1]
+        if dupes:
+            raise ValueError(f"Duplicate sample_run_id(s) in manifest: {sorted(dupes)}")
+
+        orders: List[int] = [s.sample_order for s in self.samples]
+        dupe_orders = [o for o in set(orders) if orders.count(o) > 1]
+        if dupe_orders:
+            raise ValueError(f"Duplicate sample_order value(s) in manifest: {sorted(dupe_orders)}")
+
+        return self
     
 class CallbackEnvelope(BaseModel):
     schema_version: str
