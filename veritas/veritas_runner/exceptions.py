@@ -16,8 +16,6 @@ from typing import ClassVar, Optional
 from veritas_runner.status import StatusClass
 from veritas_runner.datamodels import CallbackPayload
 
-_RETRYABLE_CODES = frozenset[int]({408, 425, 429, 500, 502, 503, 504})
-
 
 class VeritasRunnerError(Exception):
     """

@@ -87,7 +87,7 @@ class PathoEQAClient:
         error=lambda result, self: self._error(
             StatusClass.MANIFEST_INVALID,
             f"Unsupported schema_version '{result.schema_version}'; "
-            f"this runner supprts major version {SUPPORTED_SCHEMA_MAJOR}.",
+            f"this runner supports major version {SUPPORTED_SCHEMA_MAJOR}.",
         ),
     )
 
