@@ -77,10 +77,6 @@ class VeritasRunnerError(Exception):
         return self.failure_class.transient
 
     @classmethod
-    def get_max_chars(cls):
-        return cls.max_detail_chars
-
-    @classmethod
     def wrap(
         cls,
         exc: BaseException,
@@ -106,10 +102,25 @@ class VeritasRunnerError(Exception):
         *,
         duration_s: Optional[float] = None,
     ) -> CallbackPayload:
-        """Constructs a structured CallbackPayload model for failure callbacks."""
+        """Constructs a structured CallbackPayload model for failure callbacks.
+
+        Truncates `self.message` to `max_detail_chars` and rounds the elapsed
+        execution time to millisecond precision (3 decimal places).
+
+        Parameters
+        ----------
+        duration_s : float | None, optional
+            Elapsed execution time in seconds for the failed operation.
+
+        Returns
+        -------
+        CallbackPayload
+            Validated inner payload containing the string failure class, truncated
+            detail, and optional duration in seconds.
+        """
         return CallbackPayload(
             failure_class=self.failure_class.value,
-            detail=self.message[:MAX_DETAIL_CHARS],
+            detail=self.message[:self.max_detail_chars],
             duration_seconds=round(duration_s, 3) if duration_s is not None else None,
         )
 
@@ -127,40 +138,71 @@ class HttpSurface(str, Enum):
     ARTEFACT = "artefact"
     CALLBACK = "callback"
 
-
-def http_failure_class(status_code: int, surface: HttpSurface) -> Optional[StatusClass]:
+class HttpFailureClassifier:
     """
-    Translate an HTTP status into the taxonomy. Returns None for < 400 so the
-    caller can use it as a guard. Pure function: no logging, no raising, no
-    self - which is what makes it testable as a table.
+    Classifier for mapping HTTP response statuses and surfaces to domain status classes.
+
+    Retryability Logic
+    ------------------
+    A status code is considered retryable if it matches either condition:
+    1. It is explicitly listed in `retryable_codes` (transient 4xx client errors).
+    2. It is any server-side failure (`status_code >= 500`).
+
+    Class Attributes
+    ----------------
+    retryable_codes : frozenset[int]
+        Specific transient 4xx status codes (e.g., 408 Request Timeout, 425 Too Early,
+        429 Too Many Requests) that are safe to retry.
+
     """
-    if status_code < 400:
-        return None
 
-    retryable = status_code in _RETRYABLE_CODES or status_code >= 500
+    retryable_codes: ClassVar[frozenset[int]] = frozenset[int]({408, 425, 429, 500, 502, 503, 504})
 
-    if surface is HttpSurface.CALLBACK:
-        if status_code in (409, 422):
-            return StatusClass.CALLBACK_INVALID
-        if status_code in (401, 403):
-            return StatusClass.AUTH_REJECTED
-        if status_code == 404:
-            return StatusClass.CALLBACK_INVALID
-        return StatusClass.CALLBACK_FAILED if retryable else StatusClass.CALLBACK_INVALID
+    @classmethod
+    def classify(cls, status_code: int, surface: HttpSurface) -> Optional[StatusClass]:
+        """
+        Map an HTTP status code and network surface to a domain StatusClass.
 
-    if surface is HttpSurface.ARTEFACT:
-        if status_code in (401, 403, 404, 410):
-            return StatusClass.ARTEFACT_INVALID
-        return StatusClass.DOWNLOAD_FAILED if retryable else StatusClass.ARTEFACT_INVALID
+        Parameters
+        ----------
+        status_code : int
+            The HTTP response status code returned by the server.
+        surface : HttpSurface
+            The network surface category where the HTTP request was made
+            (e.g., CONTROL_PLANE, ARTEFACT, or CALLBACK).
 
-    # CONTROL_PLANE
-    if status_code in (401, 403):
-        return StatusClass.AUTH_REJECTED
-    if status_code == 404:
-        return StatusClass.ATTEMPT_NOT_FOUND
-    if retryable:
-        return StatusClass.UPSTREAM_UNAVAILABLE
-    return StatusClass.INVALID_INPUT
+        Returns
+        -------
+        StatusClass | None
+            The mapped failure taxonomy category for error status codes (>= 400),
+            or None for non-error status codes (< 400).
+        """
+        if status_code < 400:
+            return None
+
+        retryable = status_code in cls.retryable_codes or status_code >= 500
+
+        match surface:
+            case HttpSurface.CALLBACK:
+                if status_code in (404, 409, 422):
+                    return StatusClass.CALLBACK_INVALID
+                if status_code in (401, 403):
+                    return StatusClass.AUTH_REJECTED
+                return StatusClass.CALLBACK_FAILED if retryable else StatusClass.CALLBACK_INVALID
+
+            case HttpSurface.ARTEFACT:
+                if status_code in (401, 403, 404, 410):
+                    return StatusClass.ARTEFACT_INVALID
+                return StatusClass.DOWNLOAD_FAILED if retryable else StatusClass.ARTEFACT_INVALID
+
+            case HttpSurface.CONTROL_PLANE:
+                if status_code in (401, 403):
+                    return StatusClass.AUTH_REJECTED
+                if status_code == 404:
+                    return StatusClass.ATTEMPT_NOT_FOUND
+                if retryable:
+                    return StatusClass.UPSTREAM_UNAVAILABLE
+                return StatusClass.INVALID_INPUT
 
 
 # ---------------------------------------------------------------------------
