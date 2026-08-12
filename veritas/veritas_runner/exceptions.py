@@ -204,11 +204,7 @@ class HttpFailureClassifier:
                     return StatusClass.UPSTREAM_UNAVAILABLE
                 return StatusClass.INVALID_INPUT
 
-
-# ---------------------------------------------------------------------------
-# Context binding
-# ---------------------------------------------------------------------------
-
+#--------------------------------------------- Binding
 
 @dataclass(frozen=True)
 class ErrorFactory:
