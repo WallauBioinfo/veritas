@@ -209,13 +209,20 @@ class HttpFailureClassifier:
 @dataclass(frozen=True)
 class ErrorFactory:
     """
-    Pre-bound error constructor. Hold one as an attribute
-    (`self._error = ErrorFactory(attempt_id=...)`) or pass one into a free
-    function.
+    Context-aware factory for creating and raising VeritasRunnerErrors.
 
-        fail = ErrorFactory(attempt_id=attempt_id, prefix=f"role={role}")
-        raise fail(StatusClass.CHECKSUM_MISMATCH, "sha256 does not match")
-        fail.raise_for_http(response.status_code, HttpSurface.ARTEFACT)
+    Pre-binds execution context metadata (such as attempt and sample identifiers)
+    so callers can instantiate exceptions or evaluate HTTP status codes without 
+    repeatedly passing contextual parameters.
+
+    Attributes
+    ----------
+    attempt_id : str | None, optional
+        Identifier for the overarching ExecutionAttempt, if known.
+    sample_run_id : str | None, optional
+        Identifier for the specific sample run when scoped to a single sample.
+    prefix : str, optional
+        Optional message prefix prepended to all constructed error messages (default: "").
     """
 
     attempt_id: Optional[str] = None
@@ -223,26 +230,27 @@ class ErrorFactory:
     prefix: str = ""
 
     def __call__(self, failure_class: StatusClass, message: str) -> VeritasRunnerError:
+        """
+        Construct a VeritasRunnerError pre-populated with factory context.
+
+        Parameters
+        ----------
+        failure_class : StatusClass
+            Domain taxonomy classification driving process exit codes and callbacks.
+        message : str
+            Human-readable summary description of the error event.
+
+        Returns
+        -------
+        VeritasRunnerError
+            An error instance pre-bound with the factory's context and prefix.
+        """
         head = f"[{self.prefix}] " if self.prefix else ""
         return VeritasRunnerError(
             failure_class=failure_class,
             message=f"{head}{message}",
             attempt_id=self.attempt_id,
             sample_run_id=self.sample_run_id,
-        )
-
-    def bind(
-        self,
-        *,
-        attempt_id: Optional[str] = None,
-        sample_run_id: Optional[str] = None,
-        prefix: Optional[str] = None,
-    ) -> "ErrorFactory":
-        """Narrow the context, e.g. `client._error.bind(sample_run_id=sr.id)`."""
-        return ErrorFactory(
-            attempt_id=attempt_id if attempt_id is not None else self.attempt_id,
-            sample_run_id=sample_run_id if sample_run_id is not None else self.sample_run_id,
-            prefix=prefix if prefix is not None else self.prefix,
         )
 
     def raise_for_http(
@@ -252,24 +260,60 @@ class ErrorFactory:
         *,
         context: str = "",
     ) -> None:
-        """Raise the mapped error for a >= 400 response; return silently otherwise."""
-        failure_class = http_failure_class(status_code, surface)
+        """
+        Evaluate an HTTP status code and raise a mapped error for status >= 400.
+
+        Delegates status code classification to `HttpFailureClassifier`. Returns
+        silently for non-error HTTP statuses (< 400).
+
+        Parameters
+        ----------
+        status_code : int
+            HTTP response status code returned by the server.
+        surface : HttpSurface
+            Target network surface (e.g., CONTROL_PLANE, ARTEFACT, or CALLBACK).
+        context : str, optional
+            Keyword-only description of the operation being executed when the HTTP 
+            request failed (e.g., "fetching sample metadata").
+
+        Raises
+        ------
+        VeritasRunnerError
+            If `status_code >= 400`, populated with the mapped failure class and context.
+        """
+        failure_class = HttpFailureClassifier.classify(status_code, surface)
         if failure_class is None:
             return
+
         where = f" during {context}" if context else ""
         raise self(failure_class, f"HTTP {status_code}{where} ({surface.value}).")
 
-    def wrap(
+    def bind(
         self,
-        exc: BaseException,
         *,
-        failure_class: StatusClass = StatusClass.INTERNAL_ERROR,
-        context: str = "",
-    ) -> VeritasRunnerError:
-        return VeritasRunnerError.wrap(
-            exc,
-            failure_class=failure_class,
-            context=f"{self.prefix} {context}".strip(),
-            attempt_id=self.attempt_id,
-            sample_run_id=self.sample_run_id,
+        attempt_id: Optional[str] = None,
+        sample_run_id: Optional[str] = None,
+        prefix: Optional[str] = None,
+    ) -> "ErrorFactory":
+        """
+        Derive a new ErrorFactory instance with updated or narrowed context.
+
+        Parameters
+        ----------
+        attempt_id : str | None, optional
+            Keyword-only override for `attempt_id`. If omitted or None, inherits current `attempt_id`.
+        sample_run_id : str | None, optional
+            Keyword-only override for `sample_run_id`. If omitted or None, inherits current `sample_run_id`.
+        prefix : str | None, optional
+            Keyword-only override for `prefix`. If omitted or None, inherits current `prefix`.
+
+        Returns
+        -------
+        ErrorFactory
+            A new immutable `ErrorFactory` instance containing updated context attributes.
+        """
+        return ErrorFactory(
+            attempt_id=attempt_id if attempt_id is not None else self.attempt_id,
+            sample_run_id=sample_run_id if sample_run_id is not None else self.sample_run_id,
+            prefix=prefix if prefix is not None else self.prefix,
         )
