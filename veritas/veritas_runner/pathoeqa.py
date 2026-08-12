@@ -211,7 +211,9 @@ class PathoEQAClient:
                 url,
                 data=body,
                 headers={
-                    "Content-Type": "application/json"                },
+                    "Content-Type": "application/json",
+                    "Idempotency-Key": envelope.event_id,
+                },
                 timeout=(CONNECT_TIMEOUT_S, READ_TIMEOUT_S),
             )
         except requests.exceptions.RequestException as e:

@@ -1,11 +1,11 @@
 # veritas_runner/exceptions.py
 #
-# Centralised error mapping for the package.
+# Centralised error mapping and callback payload factory for the package.
 #
-# Three things live here, and nothing else:
-#   1. VeritasRunnerError - Exception type the runner raises on purpose.
-#   2. http_failure_class() - HTTP status becomes a StatusClass.
-#   3. ErrorFactory - context binding (attempt_id / sample_run_id / role) 
+# Three classes:
+#   1. VeritasRunnerError: Holds the error data (attempt_id, message, max_detail_chars) and generates the callback payload.
+#   2. HttpFailureClassifier: Maps (status_code, surface) $\rightarrow$ StatusClass (or None).
+#   3. ErrorFactory: Context binding (attempt_id / sample_run_id / role) 
 
 from __future__ import annotations
 
