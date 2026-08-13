@@ -27,17 +27,29 @@ from typing import List, Optional
 
 import requests
 
-from veritas_runner.action_status import StatusClass
-from veritas_runner.artefacts import download_artefact
+from veritas_runner.artefacts import (
+    download_artefact,
+    install_truth_vcf_index,
+    prepare_rtg_sdf,
+)
 from veritas_runner.datamodels import CallbackEnvelope, Manifest, SampleInput
 from veritas_runner.exceptions import VeritasRunnerError
+from veritas_runner.helpers import _validate_prerequisites
 from veritas_runner.pathoeqa import PathoEQAClient
 from veritas_runner.retry import with_auto_retry  # remove this line to drop retries
+from veritas_runner.status import StatusClass
 
 logger = logging.getLogger(__name__)
 
 CALLBACK_SCHEMA_VERSION = os.environ.get("VERITAS_CALLBACK_SCHEMA_VERSION", "1.0")
 
+# Optional region BED files — passed to veritas validate only when downloaded.
+_BED_CLI_FLAGS = {
+    "primer_bed": "--primerd-bed",
+    "mask_bed": "--mask-bed",
+    "low_cov_truth_bed": "--low-cov-truth-bed",
+    "low_cov_query_bed": "--low-cov-query-bed",
+}
 
 
 # --------------------------------------------------------------------- results
@@ -67,9 +79,6 @@ class AttemptResult:
     @property
     def exit_code(self) -> int:
         return self.status.exit_code
-
-
-
 
 
 # ------------------------------------------------------------------- reporting
@@ -149,7 +158,10 @@ def _materialize_sample(
         ]
 
     for artefact in to_fetch:
-        dest = os.path.join(sample_dir, f"{artefact.role}_{os.path.basename(artefact.url.split('?')[0])}")
+        dest = os.path.join(
+            sample_dir,
+            f"{artefact.role}_{os.path.basename(artefact.url.split('?')[0])}",
+        )
         paths[artefact.role] = with_auto_retry(
             lambda a=artefact, d=dest: download_artefact(
                 a, d, session=session, attempt_id=attempt_id, deadline=deadline
@@ -157,6 +169,15 @@ def _materialize_sample(
             description=f"download {artefact.role}",
             deadline=deadline,
         )
+
+    paths["rtg_sdf"] = prepare_rtg_sdf(
+        paths["rtg_sdf"],
+        os.path.join(sample_dir, "rtg_sdf"),
+        attempt_id=attempt_id,
+    )
+
+    if "truth_tbi" in paths:
+        install_truth_vcf_index(paths["truth_vcf"], paths["truth_tbi"])
 
     return paths
 
@@ -171,8 +192,17 @@ def _run_veritas(paths: dict, output_dir: str, timeout_s: int) -> None:
     if "query_vcf" in paths:
         cmd += ["--query-vcf", paths["query_vcf"]]
     if "query_fasta" in paths:
-        cmd += ["--query-fasta", paths["query_fasta"], "--reference", paths["reference_fasta"]]
+        cmd += [
+            "--query-fasta",
+            paths["query_fasta"],
+            "--reference",
+            paths["reference_fasta"],
+        ]
     cmd += ["--truth-vcf", paths["truth_vcf"], "--rtg-reference", paths["rtg_sdf"]]
+
+    for role, flag in _BED_CLI_FLAGS.items():
+        if role in paths:
+            cmd += [flag, paths[role]]
 
     try:
         subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s, check=True)
@@ -282,114 +312,108 @@ def run_attempt(
     api_url = api_url or os.environ.get("PATHOEQA_API_URL", "")
     oidc_token = oidc_token or os.environ.get("GITHUB_OIDC_TOKEN", "")
 
-    if not attempt_id or not attempt_id.strip():
-        raise VeritasRunnerError(
-            failure_class=StatusClass.INVALID_INPUT, message="attempt_id is empty or missing."
-        )
-    try:
-        os.makedirs(workdir, exist_ok=True)
-    except OSError as e:
-        raise VeritasRunnerError(
-            failure_class=StatusClass.CONFIG_ERROR,
-            message=f"Workspace '{workdir}' is not writable: {e}",
-        ) from e
+    _validate_prerequisites(attempt_id, workdir, api_url, oidc_token)
 
     session = requests.Session()
     client = PathoEQAClient(api_url, oidc_token, attempt_id, session=session)
 
-    # --- Phase 1a: no manifest yet, so no callback channel exists. Failures
-    # here can only be signalled through the process exit code.
-    manifest: Manifest = with_auto_retry(
-        client.fetch_manifest, description="manifest fetch"
-    )
-
-    deadline = time.monotonic() + manifest.operational_deadline_seconds
-    reporter = AttemptReporter(client, attempt_id, workflow_run_id)
-
-    # --- Phase 1b onward: a manifest exists, so every outcome is reportable.
-    reporter.emit(
-        "attempt_started",
-        payload={"sample_count": len(manifest.samples)},
-        deadline=deadline,
-        best_effort=True,
-    )
-
-    outcomes: List[SampleOutcome] = []
-    stopped_early: Optional[VeritasRunnerError] = None
-
-    for sample in sorted(manifest.samples, key=lambda s: s.sample_order):
-        if time.monotonic() > deadline:
-            stopped_early = VeritasRunnerError(
-                failure_class=StatusClass.DEADLINE_EXCEEDED,
-                message=(
-                    f"Operational deadline reached after {len(outcomes)}/"
-                    f"{len(manifest.samples)} samples; remaining samples left pending."
-                ),
-                attempt_id=attempt_id,
-            )
-            break
-
-        outcome = _process_sample(
-            sample,
-            workdir,
-            session,
-            attempt_id,
-            reporter,
-            deadline,
-            per_sample_timeout_s=max(1, int(deadline - time.monotonic())),
-            dry_run=dry_run,
-        )
-        outcomes.append(outcome)
-
-        # An environment fault is not sample-specific - every remaining sample
-        # would hit it too. Stop and let PathoEQA decide, rather than burning
-        # the budget producing identical failures.
-        if outcome.status in (StatusClass.CONFIG_ERROR, StatusClass.AUTH_REJECTED):
-            stopped_early = VeritasRunnerError(
-                failure_class=outcome.status,
-                message=f"Aborting attempt: {outcome.message}",
-                attempt_id=attempt_id,
-            )
-            break
-
-    succeeded = [o for o in outcomes if o.ok]
-    unprocessed = len(manifest.samples) - len(outcomes)
-
-    if succeeded and len(succeeded) == len(manifest.samples):
-        terminal_state, status, event = "Completed", StatusClass.SUCCESS, "attempt_completed"
-    elif succeeded:
-        terminal_state, event = "Partial", "attempt_partial"
-        status = stopped_early.failure_class if stopped_early else StatusClass.SUCCESS
-    else:
-        terminal_state, event = "Failed", "attempt_failed"
-        status = (
-            stopped_early.failure_class
-            if stopped_early
-            else (outcomes[0].status if outcomes else StatusClass.INTERNAL_ERROR)
+    try:
+        # --- Phase 1a: no manifest yet, so no callback channel exists. Failures
+        # here can only be signalled through the process exit code.
+        manifest: Manifest = with_auto_retry(
+            client.fetch_manifest, description="manifest fetch"
         )
 
-    duration_ms = int((time.monotonic() - started) * 1000)
+        deadline = time.monotonic() + manifest.operational_deadline_seconds
+        reporter = AttemptReporter(client, attempt_id, workflow_run_id)
 
-    # Terminal callback is NOT best-effort. If PathoEQA never learns the
-    # outcome the attempt goes `Stale`, which is worse than a loud failure.
-    reporter.emit(
-        event,
-        payload={
-            "terminal_state": terminal_state,
-            "duration_ms": duration_ms,
-            "veritas_version": _veritas_version(),
-            "samples_total": len(manifest.samples),
-            "samples_succeeded": len(succeeded),
-            "samples_unprocessed": unprocessed,
-            "failure_class": None if status is StatusClass.SUCCESS else status.value,
-        },
-    )
+        # --- Phase 1b onward: a manifest exists, so every outcome is reportable.
+        reporter.emit(
+            "attempt_started",
+            payload={"sample_count": len(manifest.samples)},
+            deadline=deadline,
+            best_effort=True,
+        )
 
-    return AttemptResult(
-        attempt_id=attempt_id,
-        terminal_state=terminal_state,
-        status=status,
-        duration_ms=duration_ms,
-        veritas_version=_veritas_version(),
-        samples=outcomes,
-    )
+        outcomes: List[SampleOutcome] = []
+        stopped_early: Optional[VeritasRunnerError] = None
+
+        for sample in sorted(manifest.samples, key=lambda s: s.sample_order):
+            if time.monotonic() > deadline:
+                stopped_early = VeritasRunnerError(
+                    failure_class=StatusClass.DEADLINE_EXCEEDED,
+                    message=(
+                        f"Operational deadline reached after {len(outcomes)}/"
+                        f"{len(manifest.samples)} samples; remaining samples left pending."
+                    ),
+                    attempt_id=attempt_id,
+                )
+                break
+
+            outcome = _process_sample(
+                sample,
+                workdir,
+                session,
+                attempt_id,
+                reporter,
+                deadline,
+                per_sample_timeout_s=max(1, int(deadline - time.monotonic())),
+                dry_run=dry_run,
+            )
+            outcomes.append(outcome)
+
+            # An environment fault is not sample-specific - every remaining sample
+            # would hit it too. Stop and let PathoEQA decide, rather than burning
+            # the budget producing identical failures.
+            if outcome.status in (StatusClass.CONFIG_ERROR, StatusClass.AUTH_REJECTED):
+                stopped_early = VeritasRunnerError(
+                    failure_class=outcome.status,
+                    message=f"Aborting attempt: {outcome.message}",
+                    attempt_id=attempt_id,
+                )
+                break
+
+        succeeded = [o for o in outcomes if o.ok]
+        unprocessed = len(manifest.samples) - len(outcomes)
+
+        if succeeded and len(succeeded) == len(manifest.samples):
+            terminal_state, status, event = "Completed", StatusClass.SUCCESS, "attempt_completed"
+        elif succeeded:
+            terminal_state, event = "Partial", "attempt_partial"
+            status = stopped_early.failure_class if stopped_early else StatusClass.SUCCESS
+        else:
+            terminal_state, event = "Failed", "attempt_failed"
+            status = (
+                stopped_early.failure_class
+                if stopped_early
+                else (outcomes[0].status if outcomes else StatusClass.INTERNAL_ERROR)
+            )
+
+        duration_ms = int((time.monotonic() - started) * 1000)
+        veritas_ver = _veritas_version()
+
+        # Terminal callback is NOT best-effort. If PathoEQA never learns the
+        # outcome the attempt goes `Stale`, which is worse than a loud failure.
+        reporter.emit(
+            event,
+            payload={
+                "terminal_state": terminal_state,
+                "duration_ms": duration_ms,
+                "veritas_version": veritas_ver,
+                "samples_total": len(manifest.samples),
+                "samples_succeeded": len(succeeded),
+                "samples_unprocessed": unprocessed,
+                "failure_class": None if status is StatusClass.SUCCESS else status.value,
+            },
+        )
+
+        return AttemptResult(
+            attempt_id=attempt_id,
+            terminal_state=terminal_state,
+            status=status,
+            duration_ms=duration_ms,
+            veritas_version=veritas_ver,
+            samples=outcomes,
+        )
+    finally:
+        client.close()

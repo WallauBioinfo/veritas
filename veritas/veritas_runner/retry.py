@@ -88,7 +88,10 @@ def with_auto_retry(
                 raise
             delay = RETRY_BASE_DELAY_S * (2**attempt_no)
             if deadline is not None and time.monotonic() + delay > deadline:
-                raise
+                raise VeritasRunnerError(
+                    failure_class=StatusClass.DEADLINE_EXCEEDED,
+                    message=f"Operational deadline reached before retrying {description}.",
+                )
             logger.warning(
                 "%s failed transiently (%s); retry %d/%d in %.1fs",
                 description,
