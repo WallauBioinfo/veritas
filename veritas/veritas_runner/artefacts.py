@@ -25,12 +25,35 @@ CHUNK_BYTES = int(os.environ.get("VERITAS_DOWNLOAD_CHUNK_BYTES", 4 * 1024 * 1024
 _ARCHIVE_SUFFIXES = (".tar.gz", ".tgz", ".tar", ".zip")
 
 
+import hashlib
+
+
 def _file_sha256(path: str) -> str:
-    digest = hashlib.sha256()
+    """
+    Calculate the SHA-256 hexadecimal digest of an existing file on disk.
+    
+    Verifies local file integrity and validates cache hits. Uses
+    `hashlib.file_digest` for C-level chunked hashing, maintaining $O(1)$
+    memory consumption regardless of file size while letting CPython manage
+    buffer sizing internally.
+
+    Parameters
+    ----------
+    path : str
+        Absolute or relative path to the file on disk.
+
+    Returns
+    -------
+    str
+        64-character lowercase hexadecimal SHA-256 digest string.
+
+    Raises
+    ------
+    OSError
+        If the file does not exist or lacks read permissions.
+    """
     with open(path, "rb") as fh:
-        while chunk := fh.read(CHUNK_BYTES):
-            digest.update(chunk)
-    return digest.hexdigest()
+        return hashlib.file_digest(fh, "sha256").hexdigest()
 
 
 def _resolve_extracted_dir(extract_to: str) -> str:
