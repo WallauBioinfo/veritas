@@ -57,7 +57,25 @@ def _file_sha256(path: str) -> str:
 
 
 def _resolve_extracted_dir(extract_to: str) -> str:
-    """If extraction produced a single top-level directory, use it as the SDF root."""
+    """
+    Unwrap a single top-level directory resulting from archive extraction.
+
+    Inspects the extraction directory while ignoring hidden files (e.g., 
+    `.DS_Store` or `.__MACOSX`). If extraction yielded exactly one top-level 
+    directory, that nested directory's path is returned as the resolved root.
+    Otherwise, the original `extract_to` path is returned.
+
+    Parameters
+    ----------
+    extract_to : str
+        Path to the target directory where the archive was extracted.
+
+    Returns
+    -------
+    str
+        Path to the single nested sub-directory if one was produced by 
+        extraction; otherwise, `extract_to`.
+    """
     entries = [e for e in os.listdir(extract_to) if not e.startswith(".")]
     if len(entries) == 1:
         sole = os.path.join(extract_to, entries[0])
@@ -81,17 +99,17 @@ def download_artefact(
     by a later continuation.
 
     Skips the HTTP transfer when `dest_path` already exists with a matching
-    SHA-256 (useful for local re-runs within the same workspace).
+    SHA-256.
 
     `deadline` is a time.monotonic() value. Checked between chunks so a slow
     transfer aborts as DEADLINE_EXCEEDED against the operational budget rather
     than being killed at the 90-minute hard timeout with nothing reported.
     """
-    if os.path.isfile(dest_path) and _file_sha256(dest_path) == artefact.sha256.lower():
+    if os.path.isfile(dest_path) and _file_sha256(dest_path) == artefact.sha256:
         logger.info("Skipping download role=%s; cached file verified at %s", artefact.role, dest_path)
         return dest_path
 
-    tmp_path = f"{dest_path}.part"
+    tmp_path = f"{dest_path}.part" # atomic staging file
     digest = hashlib.sha256()
     written = 0
 
@@ -167,7 +185,7 @@ def download_artefact(
             )
 
         computed = digest.hexdigest()
-        if computed != artefact.sha256.lower():
+        if computed != artefact.sha256:
             raise fail(
                 StatusClass.CHECKSUM_MISMATCH,
                 f"SHA-256 mismatch: expected {artefact.sha256[:12]}…, "
@@ -179,7 +197,7 @@ def download_artefact(
         return dest_path
 
     except Exception:
-        _discard(tmp_path)
+        _discard_partial(tmp_path)
         raise
 
 
@@ -251,7 +269,7 @@ def install_truth_vcf_index(truth_vcf_path: str, tbi_path: str) -> None:
     shutil.copy2(tbi_path, expected)
 
 
-def _discard(path: str) -> None:
+def _discard_partial(path: str) -> None:
     try:
         os.remove(path)
     except FileNotFoundError:
