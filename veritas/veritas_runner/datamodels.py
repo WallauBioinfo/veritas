@@ -128,6 +128,9 @@ class Manifest(BaseModel):
 
         return self
     
+    #TODO: def validate_compatibility: check SUPPORTED_MANIFEST_VERSIONS, SUPPORTED_POLICY_VERSIONS, SUPPORTED_TRUTH_PACKAGE_VERSIONS
+
+    
 class CallbackEnvelope(BaseModel):
     schema_version: str
     event_id: str

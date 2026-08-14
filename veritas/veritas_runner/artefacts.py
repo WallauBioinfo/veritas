@@ -1,5 +1,3 @@
-# veritas_runner/artefacts.py
-
 from __future__ import annotations
 
 import hashlib
@@ -14,156 +12,223 @@ from typing import Optional
 import requests
 
 from veritas_runner.datamodels import ManifestFile
-from veritas_runner.exceptions import HttpFailureClassifier, HttpSurface, VeritasRunnerError
+from veritas_runner.exceptions import ErrorFactory, HttpSurface, VeritasRunnerError
 from veritas_runner.status import StatusClass
 
 logger = logging.getLogger(__name__)
 
-DOWNLOAD_CONNECT_TIMEOUT_S = float(os.environ.get("VERITAS_DOWNLOAD_CONNECT_TIMEOUT", 10))
-DOWNLOAD_READ_TIMEOUT_S = float(os.environ.get("VERITAS_DOWNLOAD_READ_TIMEOUT", 60))
-CHUNK_BYTES = int(os.environ.get("VERITAS_DOWNLOAD_CHUNK_BYTES", 4 * 1024 * 1024))
-_ARCHIVE_SUFFIXES = (".tar.gz", ".tgz", ".tar", ".zip")
 
+class ArtefactClient:
+    """Attempt-scoped helper for materializing manifest artefacts on disk.
 
-import hashlib
-
-
-def _file_sha256(path: str) -> str:
-    """
-    Calculate the SHA-256 hexadecimal digest of an existing file on disk.
-    
-    Verifies local file integrity and validates cache hits. Uses
-    `hashlib.file_digest` for C-level chunked hashing, maintaining $O(1)$
-    memory consumption regardless of file size while letting CPython manage
-    buffer sizing internally.
+    Owns three related jobs:
+      - `download`: stream a signed URL to disk, verified by size + SHA-256.
+      - `prepare_rtg_sdf`: unpack a downloaded RTG SDF archive, or accept one
+        already extracted.
+      - `install_truth_vcf_index`: place a downloaded `.tbi` where tabix expects
+        it, adjacent to the truth VCF it indexes.
 
     Parameters
     ----------
-    path : str
-        Absolute or relative path to the file on disk.
+    session : requests.Session
+        Active HTTP session used for streaming artifact downloads.
+    attempt_id : str, optional
+        Unique execution attempt identifier for log correlation and error tagging.
+    connect_timeout_s : float, optional
+        HTTP connection timeout in seconds. Defaults to `VERITAS_DOWNLOAD_CONNECT_TIMEOUT`
+        env var or 10.0 seconds.
+    read_timeout_s : float, optional
+        HTTP read timeout in seconds. Defaults to `VERITAS_DOWNLOAD_READ_TIMEOUT`
+        env var or 60.0 seconds.
+    chunk_bytes : int, optional
+        Chunk size in bytes when streaming responses to disk. Defaults to
+        `VERITAS_DOWNLOAD_CHUNK_BYTES` env var or 4 MiB (4,194,304 bytes).
 
-    Returns
-    -------
-    str
-        64-character lowercase hexadecimal SHA-256 digest string.
-
-    Raises
-    ------
-    OSError
-        If the file does not exist or lacks read permissions.
-    """
-    with open(path, "rb") as fh:
-        return hashlib.file_digest(fh, "sha256").hexdigest()
-
-
-def _resolve_extracted_dir(extract_to: str) -> str:
-    """
-    Unwrap a single top-level directory resulting from archive extraction.
-
-    Inspects the extraction directory while ignoring hidden files (e.g., 
-    `.DS_Store` or `.__MACOSX`). If extraction yielded exactly one top-level 
-    directory, that nested directory's path is returned as the resolved root.
-    Otherwise, the original `extract_to` path is returned.
-
-    Parameters
+    Attributes
     ----------
-    extract_to : str
-        Path to the target directory where the archive was extracted.
-
-    Returns
-    -------
-    str
-        Path to the single nested sub-directory if one was produced by 
-        extraction; otherwise, `extract_to`.
+    session : requests.Session
+        HTTP session instance.
+    attempt_id : str or None
+        Attempt ID string if configured.
+    connect_timeout_s : float
+        Resolved HTTP connect timeout.
+    read_timeout_s : float
+        Resolved HTTP read timeout.
+    chunk_bytes : int
+        Resolved chunk buffer size in bytes.
     """
-    entries = [e for e in os.listdir(extract_to) if not e.startswith(".")]
-    if len(entries) == 1:
-        sole = os.path.join(extract_to, entries[0])
-        if os.path.isdir(sole):
-            return sole
-    return extract_to
 
+    _ARCHIVE_SUFFIXES = (".tar.gz", ".tgz", ".tar", ".zip")
 
-def download_artefact(
-    artefact: ManifestFile,
-    dest_path: str,
-    session: requests.Session,
-    attempt_id: Optional[str] = None,
-    deadline: Optional[float] = None,
-) -> str:
-    """
-    Stream one manifest artefact to disk, hashing as it goes.
+    DEFAULT_CONNECT_TIMEOUT_S: float = 10.0
+    DEFAULT_READ_TIMEOUT_S: float = 60.0
+    DEFAULT_CHUNK_BYTES: int = 4 * 1024 * 1024
 
-    Writes to `<dest_path>.part` and renames only after size and SHA-256 both
-    verify, so a truncated or corrupt file can never be mistaken for a good one
-    by a later continuation.
+    def __init__(
+        self,
+        session: requests.Session,
+        attempt_id: Optional[str] = None,
+        connect_timeout_s: Optional[float] = None,
+        read_timeout_s: Optional[float] = None,
+        chunk_bytes: Optional[int] = None,
+    ) -> None:
+        self.session = session
+        self.attempt_id = attempt_id
+        self._error = ErrorFactory(attempt_id=attempt_id)
 
-    Skips the HTTP transfer when `dest_path` already exists with a matching
-    SHA-256.
-
-    `deadline` is a time.monotonic() value. Checked between chunks so a slow
-    transfer aborts as DEADLINE_EXCEEDED against the operational budget rather
-    than being killed at the 90-minute hard timeout with nothing reported.
-    """
-    if os.path.isfile(dest_path) and _file_sha256(dest_path) == artefact.sha256:
-        logger.info("Skipping download role=%s; cached file verified at %s", artefact.role, dest_path)
-        return dest_path
-
-    tmp_path = f"{dest_path}.part" # atomic staging file
-    digest = hashlib.sha256()
-    written = 0
-
-    os.makedirs(os.path.dirname(os.path.abspath(dest_path)), exist_ok=True)
-    logger.info("Downloading role=%s -> %s", artefact.role, dest_path)
-
-    def fail(failure_class: StatusClass, message: str) -> VeritasRunnerError:
-        return VeritasRunnerError(
-            failure_class=failure_class,
-            message=f"[role={artefact.role}] {message}",
-            attempt_id=attempt_id,
+        self.connect_timeout_s = (
+            connect_timeout_s
+            if connect_timeout_s is not None
+            else float(os.environ.get("VERITAS_DOWNLOAD_CONNECT_TIMEOUT", self.DEFAULT_CONNECT_TIMEOUT_S))
+        )
+        self.read_timeout_s = (
+            read_timeout_s
+            if read_timeout_s is not None
+            else float(os.environ.get("VERITAS_DOWNLOAD_READ_TIMEOUT", self.DEFAULT_READ_TIMEOUT_S))
+        )
+        self.chunk_bytes = (
+            chunk_bytes
+            if chunk_bytes is not None
+            else int(os.environ.get("VERITAS_DOWNLOAD_CHUNK_BYTES", self.DEFAULT_CHUNK_BYTES))
         )
 
-    try:
+    # ------------------------------------------------------------- download
+
+    def download(
+        self,
+        artefact: ManifestFile,
+        dest_path: str,
+        deadline: Optional[float] = None,
+    ) -> str:
+        """Stream one manifest artefact to disk, hashing as it goes.
+
+        Writes to `<dest_path>.part` and renames only after size and SHA-256
+        both verify, so a truncated or corrupt file can never be mistaken for
+        a good one by a later continuation.
+
+        Skips the HTTP transfer entirely when `dest_path` already exists with
+        a matching SHA-256 digest.
+
+        Parameters
+        ----------
+        artefact : ManifestFile
+            Manifest metadata entry containing target URL, expected SHA-256,
+            and size.
+        dest_path : str
+            Final destination filesystem path for the downloaded file.
+        deadline : float, optional
+            Monotonic time limit (`time.monotonic()`). Checked between chunks so
+            a slow transfer aborts as `DEADLINE_EXCEEDED` rather than hitting
+            a hard process timeout.
+
+        Returns
+        -------
+        str
+            The verified path to the downloaded file (`dest_path`).
+
+        Raises
+        ------
+        VeritasRunnerError
+            If HTTP transfer fails, checksum or size mismatches, deadline is
+            exceeded, or filesystem write fails.
+        """
+        fail = self._error.bind(prefix=f"role={artefact.role}")
+
+        if self._is_cached(dest_path, artefact.sha256):
+            logger.info("Skipping download role=%s; cached file verified at %s", artefact.role, dest_path)
+            return dest_path
+
+        tmp_path = f"{dest_path}.part"
+        os.makedirs(os.path.dirname(os.path.abspath(dest_path)), exist_ok=True)
+        logger.info("Downloading role=%s -> %s", artefact.role, dest_path)
+
         try:
-            with session.get(
+            written, digest = self._stream_to_disk(artefact, tmp_path, deadline, fail)
+            self._verify_written(artefact, written, digest, fail)
+            os.replace(tmp_path, dest_path)
+            logger.info("Verified role=%s (%d bytes)", artefact.role, written)
+            return dest_path
+        except Exception:
+            self._discard_partial(tmp_path)
+            raise
+
+    def _is_cached(self, dest_path: str, expected_sha256: str) -> bool:
+        """Check if target path already exists on disk with matching content hash.
+
+        Parameters
+        ----------
+        dest_path : str
+            Path to check on disk.
+        expected_sha256 : str
+            Expected SHA-256 hex digest string.
+
+        Returns
+        -------
+        bool
+            `True` if file exists and SHA-256 digest matches `expected_sha256`,
+            `False` otherwise.
+        """
+        return os.path.isfile(dest_path) and self._file_sha256(dest_path) == expected_sha256
+
+    def _stream_to_disk(
+        self,
+        artefact: ManifestFile,
+        tmp_path: str,
+        deadline: Optional[float],
+        fail: ErrorFactory,
+    ) -> tuple[int, "hashlib._Hash"]:
+        """Perform the HTTP GET request and write response body to disk chunk by chunk.
+
+        Parameters
+        ----------
+        artefact : ManifestFile
+            Manifest metadata entry describing target artefact URL and size.
+        tmp_path : str
+            Temporary `.part` path to store in-progress download bytes.
+        deadline : float or None
+            Monotonic time limit threshold.
+        fail : ErrorFactory
+            Bound error factory for contextual exception raising.
+
+        Returns
+        -------
+        tuple of (int, hashlib._Hash)
+            A 2-element tuple containing:
+            - `written` : Total count of bytes written to disk.
+            - `digest` : Update-in-progress `hashlib` SHA-256 object.
+
+        Raises
+        ------
+        VeritasRunnerError
+            On HTTP error response, mid-transfer timeout, transport failure,
+            or OS write error.
+        """
+        digest = hashlib.sha256()
+        written = 0
+
+        try:
+            with self.session.get(
                 artefact.url,
                 stream=True,
-                timeout=(DOWNLOAD_CONNECT_TIMEOUT_S, DOWNLOAD_READ_TIMEOUT_S),
+                timeout=(self.connect_timeout_s, self.read_timeout_s),
                 # Identity encoding is mandatory: if a proxy gzips the stream,
                 # requests transparently inflates it and the SHA-256 we compute
-                # no longer matches the one PathoEQA froze.
+                # no longer matches the one frozen in manifest.
                 headers={"Accept-Encoding": "identity"},
-                # Signed URLs carry their own auth; never leak the OIDC bearer
-                # to an object-storage host.
+                # Signed URLs carry their own auth; never leak OIDC bearer tokens.
                 auth=None,
             ) as response:
                 if response.status_code >= 400:
-                    failure_class = HttpFailureClassifier.classify(
-                        response.status_code, HttpSurface.ARTEFACT
-                    )
-                    raise fail(
-                        failure_class or StatusClass.DOWNLOAD_FAILED,
-                        f"HTTP {response.status_code} fetching artefact.",
-                    )
+                    fail.raise_for_http(response.status_code, HttpSurface.ARTEFACT, context="artefact download")
 
                 with open(tmp_path, "wb") as fh:
-                    for chunk in response.iter_content(chunk_size=CHUNK_BYTES):
+                    for chunk in response.iter_content(chunk_size=self.chunk_bytes):
                         if not chunk:
                             continue
                         fh.write(chunk)
                         digest.update(chunk)
                         written += len(chunk)
-
-                        if artefact.size is not None and written > artefact.size:
-                            raise fail(
-                                StatusClass.CHECKSUM_MISMATCH,
-                                f"Stream exceeded declared size of {artefact.size} bytes.",
-                            )
-                        if deadline is not None and time.monotonic() > deadline:
-                            raise fail(
-                                StatusClass.DEADLINE_EXCEEDED,
-                                f"Operational deadline hit after {written} bytes.",
-                            )
+                        self._check_stream_invariants(artefact, written, deadline, fail)
                     fh.flush()
                     os.fsync(fh.fileno())
 
@@ -172,108 +237,273 @@ def download_artefact(
         except requests.exceptions.Timeout as e:
             raise fail(StatusClass.DOWNLOAD_FAILED, "Timed out mid-transfer.") from e
         except requests.exceptions.RequestException as e:
-            raise fail(
-                StatusClass.DOWNLOAD_FAILED, f"Transport failure: {type(e).__name__}"
-            ) from e
+            raise fail(StatusClass.DOWNLOAD_FAILED, f"Transport failure: {type(e).__name__}") from e
         except OSError as e:
             raise fail(StatusClass.CONFIG_ERROR, f"Cannot write to disk: {e}") from e
 
-        if artefact.size is not None and written != artefact.size:
+        return written, digest
+
+    @staticmethod
+    def _check_stream_invariants(
+        artefact: ManifestFile,
+        written: int,
+        deadline: Optional[float],
+        fail: ErrorFactory,
+    ) -> None:
+        """Validate in-flight stream limits during download loop.
+
+        Parameters
+        ----------
+        artefact : ManifestFile
+            Manifest file entry.
+        written : int
+            Current byte count written.
+        deadline : float or None
+            Monotonic time limit threshold.
+        fail : ErrorFactory
+            Bound error factory instance.
+
+        Raises
+        ------
+        VeritasRunnerError
+            If written bytes exceed declared size or current monotonic time
+            exceeds deadline.
+        """
+        if artefact.size is not None and written > artefact.size:
             raise fail(
                 StatusClass.CHECKSUM_MISMATCH,
-                f"Size mismatch: declared {artefact.size} bytes, received {written}.",
+                f"Stream exceeded declared size of {artefact.size} bytes.",
+            )
+        if deadline is not None and time.monotonic() > deadline:
+            raise fail(
+                StatusClass.DEADLINE_EXCEEDED,
+                f"Operational deadline hit after {written} bytes.",
+            )
+
+    @staticmethod
+    def _verify_written(
+        artefact: ManifestFile,
+        written: int,
+        digest: "hashlib._Hash",
+        fail: ErrorFactory,
+    ) -> None:
+        """Verify completed download size and SHA-256 against manifest declarations.
+
+        Parameters
+        ----------
+        artefact : ManifestFile
+            Manifest metadata declaration.
+        written : int
+            Total bytes written to disk.
+        digest : hashlib._Hash
+            Completed `sha256` hashing object.
+        fail : ErrorFactory
+            Bound error factory instance.
+
+        Raises
+        ------
+        VeritasRunnerError
+            If final byte count is truncated or computed SHA-256 does not match.
+        """
+        if artefact.size is not None and written < artefact.size:
+            raise fail(
+                StatusClass.CHECKSUM_MISMATCH,
+                f"Truncated download: expected {artefact.size} bytes, received {written}.",
             )
 
         computed = digest.hexdigest()
         if computed != artefact.sha256:
             raise fail(
                 StatusClass.CHECKSUM_MISMATCH,
-                f"SHA-256 mismatch: expected {artefact.sha256[:12]}…, "
-                f"got {computed[:12]}….",
+                f"SHA-256 mismatch: expected {artefact.sha256[:12]}…, got {computed[:12]}….",
             )
 
-        os.replace(tmp_path, dest_path)
-        logger.info("Verified role=%s (%d bytes)", artefact.role, written)
-        return dest_path
+    # ---------------------------------------------------------- rtg sdf prep
 
-    except Exception:
-        _discard_partial(tmp_path)
-        raise
+    def prepare_rtg_sdf(self, downloaded_path: str, extract_dir: str) -> str:
+        """Ensure `--rtg-reference` points at a valid RTG SDF directory structure.
 
+        Accepts an already-extracted directory or an archive (`.tar.gz`, `.tgz`,
+        `.tar`, `.zip`). Verifies presence of the `mainIndex` descriptor file required
+        by RTG tools.
 
-def prepare_rtg_sdf(
-    downloaded_path: str,
-    extract_dir: str,
-    *,
-    attempt_id: Optional[str] = None,
-) -> str:
-    """
-    Ensure `--rtg-reference` points at an RTG SDF directory.
+        Parameters
+        ----------
+        downloaded_path : str
+            Local path to an extracted directory or downloaded archive file.
+        extract_dir : str
+            Target extraction directory path when unpacking archives.
 
-    Accepts an already-extracted directory or an archive (.tar.gz, .tgz, .tar, .zip).
-    """
-    if os.path.isdir(downloaded_path):
-        if not os.listdir(downloaded_path):
-            raise VeritasRunnerError(
+        Returns
+        -------
+        str
+            Verified absolute path to the prepared RTG SDF directory.
+
+        Raises
+        ------
+        VeritasRunnerError
+            If directory is empty, archive format is unknown, archive unpacking
+            fails, or extracted result is missing `mainIndex`.
+        """
+        fail = self._error.bind(prefix="rtg_sdf")
+
+        if os.path.isdir(downloaded_path):
+            main_index = os.path.join(downloaded_path, "mainIndex")
+            if not os.path.isfile(main_index):
+                raise fail(
+                    StatusClass.ARTEFACT_INVALID,
+                    f"RTG SDF directory missing required 'mainIndex': {downloaded_path}",
+                )
+            return downloaded_path
+
+        lower = downloaded_path.lower()
+        if not any(lower.endswith(suffix) for suffix in self._ARCHIVE_SUFFIXES):
+            raise fail(
                 StatusClass.ARTEFACT_INVALID,
-                f"RTG SDF directory is empty: {downloaded_path}",
-                attempt_id=attempt_id,
+                f"rtg_sdf must be a directory or archive, got file: {downloaded_path}",
             )
-        return downloaded_path
 
-    lower = downloaded_path.lower()
-    if not any(lower.endswith(suffix) for suffix in _ARCHIVE_SUFFIXES):
-        raise VeritasRunnerError(
-            StatusClass.ARTEFACT_INVALID,
-            f"rtg_sdf must be a directory or archive, got file: {downloaded_path}",
-            attempt_id=attempt_id,
-        )
+        if os.path.exists(extract_dir):
+            shutil.rmtree(extract_dir)
+        os.makedirs(extract_dir, exist_ok=True)
 
-    if os.path.exists(extract_dir):
-        shutil.rmtree(extract_dir)
-    os.makedirs(extract_dir, exist_ok=True)
+        self._extract_archive(downloaded_path, extract_dir, lower, fail)
 
-    try:
-        if lower.endswith(".zip"):
-            with zipfile.ZipFile(downloaded_path) as zf:
-                zf.extractall(extract_dir)
-        else:
-            with tarfile.open(downloaded_path, "r:*") as tf:
-                tf.extractall(extract_dir, filter="data")
-    except (OSError, tarfile.TarError, zipfile.BadZipFile) as e:
-        raise VeritasRunnerError(
-            StatusClass.ARTEFACT_INVALID,
-            f"Could not extract rtg_sdf archive: {e}",
-            attempt_id=attempt_id,
-        ) from e
+        sdf_dir = self._resolve_extracted_dir(extract_dir)
+        main_index = os.path.join(sdf_dir, "mainIndex")
+        if not os.path.isdir(sdf_dir) or not os.path.isfile(main_index):
+            raise fail(
+                StatusClass.ARTEFACT_INVALID,
+                f"Extracted RTG SDF directory is missing 'mainIndex': {sdf_dir}",
+            )
+        return sdf_dir
 
-    sdf_dir = _resolve_extracted_dir(extract_dir)
-    if not os.path.isdir(sdf_dir) or not os.listdir(sdf_dir):
-        raise VeritasRunnerError(
-            StatusClass.ARTEFACT_INVALID,
-            f"Extracted RTG SDF directory is empty: {sdf_dir}",
-            attempt_id=attempt_id,
-        )
-    return sdf_dir
+    @classmethod
+    def _extract_archive(cls, archive_path: str, extract_dir: str, lower: str, fail: ErrorFactory) -> None:
+        """Extract a `.zip` or `.tar` archive into target destination safely.
 
+        Parameters
+        ----------
+        archive_path : str
+            Path to compressed archive on disk.
+        extract_dir : str
+            Target output directory.
+        lower : str
+            Lowercased filename string for extension checking.
+        fail : ErrorFactory
+            Bound error factory instance.
 
-def install_truth_vcf_index(truth_vcf_path: str, tbi_path: str) -> None:
-    """
-    Place the truth VCF tabix index where pysam/rtg expect it: adjacent to the VCF.
-    """
-    expected = f"{truth_vcf_path}.tbi"
-    if os.path.abspath(tbi_path) == os.path.abspath(expected):
-        return
-    if os.path.exists(expected):
-        os.remove(expected)
-    shutil.copy2(tbi_path, expected)
+        Raises
+        ------
+        VeritasRunnerError
+            If archive extraction fails or contains unsafe paths (zip-slip).
+        """
+        try:
+            if lower.endswith(".zip"):
+                with zipfile.ZipFile(archive_path) as zf:
+                    cls._check_zip_members_safe(zf, extract_dir, fail)
+                    zf.extractall(extract_dir)
+            else:
+                with tarfile.open(archive_path, "r:*") as tf:
+                    tf.extractall(extract_dir, filter="data")
+        except (OSError, tarfile.TarError, zipfile.BadZipFile) as e:
+            raise fail(StatusClass.ARTEFACT_INVALID, f"Could not extract rtg_sdf archive: {e}") from e
 
+    @staticmethod
+    def _check_zip_members_safe(zf: zipfile.ZipFile, extract_dir: str, fail: ErrorFactory) -> None:
+        """Validate zip file entries against path traversal (Zip-Slip) vulnerability.
 
-def _discard_partial(path: str) -> None:
-    try:
-        os.remove(path)
-    except FileNotFoundError:
-        pass
-    except OSError as e:
-        logger.warning("Could not remove partial file %s: %s", path, e)
-''
+        Parameters
+        ----------
+        zf : zipfile.ZipFile
+            Open ZipFile object.
+        extract_dir : str
+            Root extraction directory.
+        fail : ErrorFactory
+            Bound error factory instance.
+
+        Raises
+        ------
+        VeritasRunnerError
+            If any archive member attempts to resolve outside `extract_dir`.
+        """
+        root = os.path.abspath(extract_dir)
+        for member in zf.namelist():
+            member_path = os.path.abspath(os.path.join(root, member))
+            if not (member_path == root or member_path.startswith(root + os.sep)):
+                raise fail(StatusClass.ARTEFACT_INVALID, f"Unsafe zip member path: {member}")
+
+    @staticmethod
+    def _resolve_extracted_dir(extract_to: str) -> str:
+        """Unwrap single root directory inside archive if present.
+
+        Parameters
+        ----------
+        extract_to : str
+            Base extraction path.
+
+        Returns
+        -------
+        str
+            Sole top-level directory path if present, otherwise `extract_to`.
+        """
+        entries = [e for e in os.listdir(extract_to) if not e.startswith(".")]
+        if len(entries) == 1:
+            sole = os.path.join(extract_to, entries[0])
+            if os.path.isdir(sole):
+                return sole
+        return extract_to
+
+    # -------------------------------------------------------- truth vcf index
+
+    def install_truth_vcf_index(self, truth_vcf_path: str, tbi_path: str) -> None:
+        """Place the truth VCF tabix index adjacent to the target VCF file.
+
+        Parameters
+        ----------
+        truth_vcf_path : str
+            Path to the truth VCF file (`.vcf.gz`).
+        tbi_path : str
+            Path to downloaded tabix index file (`.tbi`).
+        """
+        expected = f"{truth_vcf_path}.tbi"
+        if os.path.abspath(tbi_path) == os.path.abspath(expected):
+            return
+        if os.path.exists(expected):
+            os.remove(expected)
+        shutil.copy2(tbi_path, expected)
+
+    # ---------------------------------------------------------------- misc
+
+    @staticmethod
+    def _file_sha256(path: str) -> str:
+        """Compute SHA-256 hex digest of an existing file using constant memory.
+
+        Parameters
+        ----------
+        path : str
+            File path on disk.
+
+        Returns
+        -------
+        str
+            Calculated SHA-256 hex string.
+        """
+        with open(path, "rb") as fh:
+            return hashlib.file_digest(fh, "sha256").hexdigest()
+
+    @staticmethod
+    def _discard_partial(path: str) -> None:
+        """Best-effort cleanup of temporary `.part` file.
+
+        Parameters
+        ----------
+        path : str
+            Path to partial file to remove.
+        """
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass
+        except OSError as e:
+            logger.warning("Could not remove partial file %s: %s", path, e)
