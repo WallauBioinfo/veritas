@@ -18,10 +18,10 @@ from veritas_runner.status import StatusClass
 logger = logging.getLogger(__name__)
 
 
-class ArtefactClient:
-    """Attempt-scoped helper for materializing manifest artefacts on disk.
+class ArtefactClass:
+    """Materialize manifest artefacts on disk per attempt.
 
-    Owns three related jobs:
+    Owns three related methods:
       - `download`: stream a signed URL to disk, verified by size + SHA-256.
       - `prepare_rtg_sdf`: unpack a downloaded RTG SDF archive, or accept one
         already extracted.
