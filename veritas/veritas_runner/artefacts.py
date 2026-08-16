@@ -170,17 +170,17 @@ class ArtefactClass:
     @classmethod
     def _extract_archive(
         cls, 
-        archive_path: str | Path, 
-        destination_path: str | Path, 
+        archive: Path, 
+        destination: Path, 
         lower: str, 
         fail: ErrorFactory) -> None:
         """Extract a `.zip` or `.tar` (including `.tar.gz` and `.tgz`) archive into target destination safely.
 
         Parameters
         ----------
-        archive_path : str | Path
+        archive_path : Path
             Path to compressed archive on disk.
-        destination_path : str | Path
+        destination_path : Path
             Target destination directory path.
         lower : str
             Lowercased filename string for extension checking.
@@ -192,9 +192,6 @@ class ArtefactClass:
         VeritasRunnerError
             If archive extraction fails or contains unsafe paths (zip-slip).
         """
-        archive = Path(archive_path)
-        destination = Path(destination_path).resolve()
-        
         try:
             if lower.endswith(".zip"):
                 with zipfile.ZipFile(archive) as zf:
@@ -232,26 +229,23 @@ class ArtefactClass:
                 raise fail(StatusClass.ARTEFACT_INVALID, f"Unsafe zip member path: {member}")
 
     @staticmethod
-    def _resolve_extracted_dir(extraction_dir: str) -> str:
+    def _resolve_extracted_dir(extraction_dir: Path) -> Path:
         """Unwrap single root directory inside extraction directory, if present.
 
         Parameters
         ----------
-        extraction_dir : str
+        extraction_dir : Path
             Resolved extraction directory path.
 
         Returns
         -------
-        str
+        Path
             Single first child directory path if present, otherwise `extraction_dir`.
         """
-        root_path = Path(extraction_dir).resolve()
-        entries = [e for e in root_path.iterdir() if not e.name.startswith(".")]
-
+        entries = [e for e in extraction_dir.iterdir() if not e.name.startswith(".")]
         if len(entries) == 1 and entries[0].is_dir():
-            return str(entries[0])
-
-        return str(root_path)
+            return entries[0]
+        return extraction_dir
 
     # ------------------------------------------------------------- download
 
@@ -264,8 +258,7 @@ class ArtefactClass:
         """Stream one manifest artefact to disk, hashing as it goes.
 
         Writes to `<dest_path>.part` and renames only after size and SHA-256
-        both verify, so a truncated or corrupt file can never be mistaken for
-        a good one by a later continuation.
+        both verify.
 
         Skips the HTTP transfer entirely when `dest_path` already exists with
         a matching SHA-256 digest.
@@ -407,7 +400,10 @@ class ArtefactClass:
     
     # ---------------------------------------------------------- rtg sdf prep
 
-    def prepare_rtg_sdf(self, downloaded_path: str, extract_dir: str) -> str:
+    def prepare_rtg_sdf(
+        self, 
+        downloaded_path: str | Path, 
+        extract_dir: str | Path) -> str:
         """Ensure `--rtg-reference` points at a valid RTG SDF directory structure.
 
         Accepts an already-extracted directory or an archive (`.tar.gz`, `.tgz`,
@@ -416,15 +412,15 @@ class ArtefactClass:
 
         Parameters
         ----------
-        downloaded_path : str
-            Local path to an extracted directory or downloaded archive file.
-        extract_dir : str
+        downloaded_path : str | Path
+            Path to an extracted directory or downloaded archive file.
+        extract_dir : str | Path
             Target extraction directory path when unpacking archives.
 
         Returns
         -------
-        str
-            Verified absolute path to the prepared RTG SDF directory.
+        Path
+            Verified absolute Path to the prepared RTG SDF directory.
 
         Raises
         ------
@@ -433,37 +429,37 @@ class ArtefactClass:
             fails, or extracted result is missing `mainIndex`.
         """
         fail = self._error.bind(prefix="rtg_sdf")
+        archive = Path(downloaded_path)
+        destination = Path(extract_dir).resolve()
 
-        if os.path.isdir(downloaded_path):
-            main_index = os.path.join(downloaded_path, "mainIndex")
-            if not os.path.isfile(main_index):
+        if archive.is_dir():
+            if not (archive / "mainIndex").is_file():
                 raise fail(
                     StatusClass.ARTEFACT_INVALID,
-                    f"RTG SDF directory missing required 'mainIndex': {downloaded_path}",
+                    f"RTG SDF directory missing required 'mainIndex': {archive}",
                 )
-            return downloaded_path
+            return archive.resolve()
 
-        lower = downloaded_path.lower()
+        lower = archive.name.lower()
         if not any(lower.endswith(suffix) for suffix in self._ARCHIVE_SUFFIXES):
             raise fail(
                 StatusClass.ARTEFACT_INVALID,
-                f"rtg_sdf must be a directory or archive, got file: {downloaded_path}",
+                f"rtg_sdf must be a directory or archive, got file: {archive}",
             )
 
-        if os.path.exists(extract_dir):
-            shutil.rmtree(extract_dir)
-        os.makedirs(extract_dir, exist_ok=True) ## TODO mv to _extract_archive?
+        if destination.exists():
+            shutil.rmtree(destination)
+        os.makedirs(destination, exist_ok=True)
 
-        self._extract_archive(downloaded_path, extract_dir, lower, fail)
+        self._extract_archive(archive, destination, lower, fail)
 
-        sdf_dir = self._resolve_extracted_dir(extract_dir)
-        main_index = os.path.join(sdf_dir, "mainIndex")
-        if not os.path.isdir(sdf_dir) or not os.path.isfile(main_index):
+        sdf_dir = self._resolve_extracted_dir(destination)
+        if not sdf_dir.is_dir() or not (sdf_dir / "mainIndex").is_file():
             raise fail(
                 StatusClass.ARTEFACT_INVALID,
                 f"Extracted RTG SDF directory is missing 'mainIndex': {sdf_dir}",
             )
-        return sdf_dir
+        return sdf_dir ## TODO: refactor runner.py to take in sdf_dir as Path
 
     
     # -------------------------------------------------------- truth vcf index
