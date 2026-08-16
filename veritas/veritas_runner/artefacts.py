@@ -92,6 +92,158 @@ class ArtefactClass:
             else int(os.environ.get("VERITAS_DOWNLOAD_CHUNK_BYTES", self.DEFAULT_CHUNK_BYTES))
         )
 
+
+    @staticmethod
+    def _check_stream_invariants(
+        artefact: ManifestFile,
+        written: int,
+        deadline: Optional[float],
+        fail: ErrorFactory,
+    ) -> None:
+        """Validate in-flight stream limits during download loop.
+
+        Parameters
+        ----------
+        artefact : ManifestFile
+            Manifest file entry.
+        written : int
+            Current byte count written.
+        deadline : float or None
+            Monotonic time limit threshold.
+        fail : ErrorFactory
+            Bound error factory instance.
+
+        Raises
+        ------
+        VeritasRunnerError
+            If written bytes exceed declared size or current monotonic time
+            exceeds deadline.
+        """
+        if artefact.size is not None and written > artefact.size:
+            raise fail(
+                StatusClass.CHECKSUM_MISMATCH,
+                f"Stream exceeded declared size of {artefact.size} bytes.",
+            )
+        if deadline is not None and time.monotonic() > deadline:
+            raise fail(
+                StatusClass.DEADLINE_EXCEEDED,
+                f"Operational deadline hit after {written} bytes.",
+            )
+
+    @staticmethod
+    def _verify_written(
+        artefact: ManifestFile,
+        written: int,
+        digest: "hashlib._Hash",
+        fail: ErrorFactory,
+    ) -> None:
+        """Verify completed download size and SHA-256 against manifest declarations.
+
+        Parameters
+        ----------
+        artefact : ManifestFile
+            Manifest metadata declaration.
+        written : int
+            Total bytes written to disk.
+        digest : hashlib._Hash
+            Completed `sha256` hashing object.
+        fail : ErrorFactory
+            Bound error factory instance.
+
+        Raises
+        ------
+        VeritasRunnerError
+            If final byte count is truncated or computed SHA-256 does not match.
+        """
+        if artefact.size is not None and written < artefact.size:
+            raise fail(
+                StatusClass.CHECKSUM_MISMATCH,
+                f"Truncated download: expected {artefact.size} bytes, received {written}.",
+            )
+
+        computed = digest.hexdigest()
+        if computed != artefact.sha256:
+            raise fail(
+                StatusClass.CHECKSUM_MISMATCH,
+                f"SHA-256 mismatch: expected {artefact.sha256[:12]}…, got {computed[:12]}….",
+            )
+
+    @classmethod
+    def _extract_archive(cls, archive_path: str, extract_dir: str, lower: str, fail: ErrorFactory) -> None:
+        """Extract a `.zip` or `.tar` archive into target destination safely.
+
+        Parameters
+        ----------
+        archive_path : str
+            Path to compressed archive on disk.
+        extract_dir : str
+            Target output directory.
+        lower : str
+            Lowercased filename string for extension checking.
+        fail : ErrorFactory
+            Bound error factory instance.
+
+        Raises
+        ------
+        VeritasRunnerError
+            If archive extraction fails or contains unsafe paths (zip-slip).
+        """
+        try:
+            if lower.endswith(".zip"):
+                with zipfile.ZipFile(archive_path) as zf:
+                    cls._check_zip_members_safe(zf, extract_dir, fail)
+                    zf.extractall(extract_dir)
+            else:
+                with tarfile.open(archive_path, "r:*") as tf:
+                    tf.extractall(extract_dir, filter="data")
+        except (OSError, tarfile.TarError, zipfile.BadZipFile) as e:
+            raise fail(StatusClass.ARTEFACT_INVALID, f"Could not extract rtg_sdf archive: {e}") from e
+
+    @staticmethod
+    def _check_zip_members_safe(zf: zipfile.ZipFile, extract_dir: str, fail: ErrorFactory) -> None:
+        """Validate zip file entries against path traversal (Zip-Slip) vulnerability.
+
+        Parameters
+        ----------
+        zf : zipfile.ZipFile
+            Open ZipFile object.
+        extract_dir : str
+            Root extraction directory.
+        fail : ErrorFactory
+            Bound error factory instance.
+
+        Raises
+        ------
+        VeritasRunnerError
+            If any archive member attempts to resolve outside `extract_dir`.
+        """
+        root = os.path.abspath(extract_dir)
+        for member in zf.namelist():
+            member_path = os.path.abspath(os.path.join(root, member))
+            if not (member_path == root or member_path.startswith(root + os.sep)):
+                raise fail(StatusClass.ARTEFACT_INVALID, f"Unsafe zip member path: {member}")
+
+    @staticmethod
+    def _resolve_extracted_dir(extract_to: str) -> str:
+        """Unwrap single root directory inside archive if present.
+
+        Parameters
+        ----------
+        extract_to : str
+            Base extraction path.
+
+        Returns
+        -------
+        str
+            Sole top-level directory path if present, otherwise `extract_to`.
+        """
+        entries = [e for e in os.listdir(extract_to) if not e.startswith(".")]
+        if len(entries) == 1:
+            sole = os.path.join(extract_to, entries[0])
+            if os.path.isdir(sole):
+                return sole
+        return extract_to
+
     # ------------------------------------------------------------- download
 
     def download(
@@ -243,81 +395,7 @@ class ArtefactClass:
 
         return written, digest
 
-    @staticmethod
-    def _check_stream_invariants(
-        artefact: ManifestFile,
-        written: int,
-        deadline: Optional[float],
-        fail: ErrorFactory,
-    ) -> None:
-        """Validate in-flight stream limits during download loop.
-
-        Parameters
-        ----------
-        artefact : ManifestFile
-            Manifest file entry.
-        written : int
-            Current byte count written.
-        deadline : float or None
-            Monotonic time limit threshold.
-        fail : ErrorFactory
-            Bound error factory instance.
-
-        Raises
-        ------
-        VeritasRunnerError
-            If written bytes exceed declared size or current monotonic time
-            exceeds deadline.
-        """
-        if artefact.size is not None and written > artefact.size:
-            raise fail(
-                StatusClass.CHECKSUM_MISMATCH,
-                f"Stream exceeded declared size of {artefact.size} bytes.",
-            )
-        if deadline is not None and time.monotonic() > deadline:
-            raise fail(
-                StatusClass.DEADLINE_EXCEEDED,
-                f"Operational deadline hit after {written} bytes.",
-            )
-
-    @staticmethod
-    def _verify_written(
-        artefact: ManifestFile,
-        written: int,
-        digest: "hashlib._Hash",
-        fail: ErrorFactory,
-    ) -> None:
-        """Verify completed download size and SHA-256 against manifest declarations.
-
-        Parameters
-        ----------
-        artefact : ManifestFile
-            Manifest metadata declaration.
-        written : int
-            Total bytes written to disk.
-        digest : hashlib._Hash
-            Completed `sha256` hashing object.
-        fail : ErrorFactory
-            Bound error factory instance.
-
-        Raises
-        ------
-        VeritasRunnerError
-            If final byte count is truncated or computed SHA-256 does not match.
-        """
-        if artefact.size is not None and written < artefact.size:
-            raise fail(
-                StatusClass.CHECKSUM_MISMATCH,
-                f"Truncated download: expected {artefact.size} bytes, received {written}.",
-            )
-
-        computed = digest.hexdigest()
-        if computed != artefact.sha256:
-            raise fail(
-                StatusClass.CHECKSUM_MISMATCH,
-                f"SHA-256 mismatch: expected {artefact.sha256[:12]}…, got {computed[:12]}….",
-            )
-
+    
     # ---------------------------------------------------------- rtg sdf prep
 
     def prepare_rtg_sdf(self, downloaded_path: str, extract_dir: str) -> str:
@@ -378,82 +456,7 @@ class ArtefactClass:
             )
         return sdf_dir
 
-    @classmethod
-    def _extract_archive(cls, archive_path: str, extract_dir: str, lower: str, fail: ErrorFactory) -> None:
-        """Extract a `.zip` or `.tar` archive into target destination safely.
-
-        Parameters
-        ----------
-        archive_path : str
-            Path to compressed archive on disk.
-        extract_dir : str
-            Target output directory.
-        lower : str
-            Lowercased filename string for extension checking.
-        fail : ErrorFactory
-            Bound error factory instance.
-
-        Raises
-        ------
-        VeritasRunnerError
-            If archive extraction fails or contains unsafe paths (zip-slip).
-        """
-        try:
-            if lower.endswith(".zip"):
-                with zipfile.ZipFile(archive_path) as zf:
-                    cls._check_zip_members_safe(zf, extract_dir, fail)
-                    zf.extractall(extract_dir)
-            else:
-                with tarfile.open(archive_path, "r:*") as tf:
-                    tf.extractall(extract_dir, filter="data")
-        except (OSError, tarfile.TarError, zipfile.BadZipFile) as e:
-            raise fail(StatusClass.ARTEFACT_INVALID, f"Could not extract rtg_sdf archive: {e}") from e
-
-    @staticmethod
-    def _check_zip_members_safe(zf: zipfile.ZipFile, extract_dir: str, fail: ErrorFactory) -> None:
-        """Validate zip file entries against path traversal (Zip-Slip) vulnerability.
-
-        Parameters
-        ----------
-        zf : zipfile.ZipFile
-            Open ZipFile object.
-        extract_dir : str
-            Root extraction directory.
-        fail : ErrorFactory
-            Bound error factory instance.
-
-        Raises
-        ------
-        VeritasRunnerError
-            If any archive member attempts to resolve outside `extract_dir`.
-        """
-        root = os.path.abspath(extract_dir)
-        for member in zf.namelist():
-            member_path = os.path.abspath(os.path.join(root, member))
-            if not (member_path == root or member_path.startswith(root + os.sep)):
-                raise fail(StatusClass.ARTEFACT_INVALID, f"Unsafe zip member path: {member}")
-
-    @staticmethod
-    def _resolve_extracted_dir(extract_to: str) -> str:
-        """Unwrap single root directory inside archive if present.
-
-        Parameters
-        ----------
-        extract_to : str
-            Base extraction path.
-
-        Returns
-        -------
-        str
-            Sole top-level directory path if present, otherwise `extract_to`.
-        """
-        entries = [e for e in os.listdir(extract_to) if not e.startswith(".")]
-        if len(entries) == 1:
-            sole = os.path.join(extract_to, entries[0])
-            if os.path.isdir(sole):
-                return sole
-        return extract_to
-
+    
     # -------------------------------------------------------- truth vcf index
 
     def install_truth_vcf_index(self, truth_vcf_path: str, tbi_path: str) -> None:

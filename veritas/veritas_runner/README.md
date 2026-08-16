@@ -20,18 +20,18 @@ Prior to downloading large data artifacts (like truth VCFs or RTG SDF references
                │
                ▼
 ┌────────────────────────────────┐
-│  3. ArtefactClient.download()  │  <-- Stream & verify SHA-256 / size
+│  3. ArtefactClass.download()   │  <-- Stream & verify SHA-256 / size
 └────────────────────────────────┘
 ```
 
 1. **Manifest Parsing & Validation**: Reads the manifest and verifies manifest, policy, and truth-package schema versions. If incompatible, execution halts immediately.
-2. **Artifact Materialization**: Hands off individual file references to `ArtefactClient` for cached lookup or network streaming.
+2. **Artifact Materialization**: Hands off individual file references to `ArtefactClass` for cached lookup or network streaming.
 
 ---
 
-### `ArtefactClient` Download Lifecycle
+### `ArtefactClass` Download Lifecycle
 
-Each artifact streaming operation managed by `ArtefactClient.download()` separates network streaming from local CPU/Disk validation to minimize open socket lifetimes and keep memory footprints predictable:
+Each artifact streaming operation managed by `ArtefactClass.download()` separates network streaming from local CPU/Disk validation to minimize open socket lifetimes and keep memory footprints predictable:
 
 ```text
 download()
