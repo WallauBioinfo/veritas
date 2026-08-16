@@ -8,7 +8,7 @@ import tarfile
 import time
 import zipfile
 from typing import Optional
-
+from pathlib import Path
 import requests
 
 from veritas_runner.datamodels import ManifestFile
@@ -92,7 +92,6 @@ class ArtefactClass:
             else int(os.environ.get("VERITAS_DOWNLOAD_CHUNK_BYTES", self.DEFAULT_CHUNK_BYTES))
         )
 
-
     @staticmethod
     def _check_stream_invariants(
         artefact: ManifestFile,
@@ -100,7 +99,7 @@ class ArtefactClass:
         deadline: Optional[float],
         fail: ErrorFactory,
     ) -> None:
-        """Validate in-flight stream limits during download loop.
+        """Validate incoming artefact stream against size and wall-clock limits during download loop.
 
         Parameters
         ----------
@@ -137,12 +136,12 @@ class ArtefactClass:
         digest: "hashlib._Hash",
         fail: ErrorFactory,
     ) -> None:
-        """Verify completed download size and SHA-256 against manifest declarations.
+        """Verify completed download size and SHA-256 against manifest declared metadata.
 
         Parameters
         ----------
         artefact : ManifestFile
-            Manifest metadata declaration.
+            Manifest file entry.
         written : int
             Total bytes written to disk.
         digest : hashlib._Hash
@@ -169,15 +168,20 @@ class ArtefactClass:
             )
 
     @classmethod
-    def _extract_archive(cls, archive_path: str, extract_dir: str, lower: str, fail: ErrorFactory) -> None:
-        """Extract a `.zip` or `.tar` archive into target destination safely.
+    def _extract_archive(
+        cls, 
+        archive_path: str | Path, 
+        destination_path: str | Path, 
+        lower: str, 
+        fail: ErrorFactory) -> None:
+        """Extract a `.zip` or `.tar` (including `.tar.gz` and `.tgz`) archive into target destination safely.
 
         Parameters
         ----------
-        archive_path : str
+        archive_path : str | Path
             Path to compressed archive on disk.
-        extract_dir : str
-            Target output directory.
+        destination_path : str | Path
+            Target destination directory path.
         lower : str
             Lowercased filename string for extension checking.
         fail : ErrorFactory
@@ -188,27 +192,32 @@ class ArtefactClass:
         VeritasRunnerError
             If archive extraction fails or contains unsafe paths (zip-slip).
         """
+        archive = Path(archive_path)
+        destination = Path(destination_path).resolve()
+        
         try:
             if lower.endswith(".zip"):
-                with zipfile.ZipFile(archive_path) as zf:
-                    cls._check_zip_members_safe(zf, extract_dir, fail)
-                    zf.extractall(extract_dir)
+                with zipfile.ZipFile(archive) as zf:
+                    cls._check_zip_members_safe(zf, destination, fail)
+                    zf.extractall(destination)
             else:
-                with tarfile.open(archive_path, "r:*") as tf:
-                    tf.extractall(extract_dir, filter="data")
+                with tarfile.open(archive, "r:*") as tf:
+                    tf.extractall(destination, filter="data") ## TODO: Require Python 3.12+
         except (OSError, tarfile.TarError, zipfile.BadZipFile) as e:
-            raise fail(StatusClass.ARTEFACT_INVALID, f"Could not extract rtg_sdf archive: {e}") from e
+            raise fail(StatusClass.ARTEFACT_INVALID, 
+            f"Could not extract archive '{archive.name}': {e}",) from e
 
     @staticmethod
-    def _check_zip_members_safe(zf: zipfile.ZipFile, extract_dir: str, fail: ErrorFactory) -> None:
+    def _check_zip_members_safe(zf: zipfile.ZipFile, extract_dir: Path, fail: ErrorFactory) -> None:
         """Validate zip file entries against path traversal (Zip-Slip) vulnerability.
+           If one file fails validation, the extraction is halted.
 
         Parameters
         ----------
         zf : zipfile.ZipFile
             Open ZipFile object.
-        extract_dir : str
-            Root extraction directory.
+        extract_dir : Path
+            Root extraction directory path.
         fail : ErrorFactory
             Bound error factory instance.
 
@@ -217,32 +226,32 @@ class ArtefactClass:
         VeritasRunnerError
             If any archive member attempts to resolve outside `extract_dir`.
         """
-        root = os.path.abspath(extract_dir)
         for member in zf.namelist():
-            member_path = os.path.abspath(os.path.join(root, member))
-            if not (member_path == root or member_path.startswith(root + os.sep)):
+            member_path = (extract_dir / member.lstrip("/\\")).resolve()
+            if not member_path.is_relative_to(extract_dir):
                 raise fail(StatusClass.ARTEFACT_INVALID, f"Unsafe zip member path: {member}")
 
     @staticmethod
-    def _resolve_extracted_dir(extract_to: str) -> str:
-        """Unwrap single root directory inside archive if present.
+    def _resolve_extracted_dir(extraction_dir: str) -> str:
+        """Unwrap single root directory inside extraction directory, if present.
 
         Parameters
         ----------
-        extract_to : str
-            Base extraction path.
+        extraction_dir : str
+            Resolved extraction directory path.
 
         Returns
         -------
         str
-            Sole top-level directory path if present, otherwise `extract_to`.
+            Single first child directory path if present, otherwise `extraction_dir`.
         """
-        entries = [e for e in os.listdir(extract_to) if not e.startswith(".")]
-        if len(entries) == 1:
-            sole = os.path.join(extract_to, entries[0])
-            if os.path.isdir(sole):
-                return sole
-        return extract_to
+        root_path = Path(extraction_dir).resolve()
+        entries = [e for e in root_path.iterdir() if not e.name.startswith(".")]
+
+        if len(entries) == 1 and entries[0].is_dir():
+            return str(entries[0])
+
+        return str(root_path)
 
     # ------------------------------------------------------------- download
 
@@ -443,7 +452,7 @@ class ArtefactClass:
 
         if os.path.exists(extract_dir):
             shutil.rmtree(extract_dir)
-        os.makedirs(extract_dir, exist_ok=True)
+        os.makedirs(extract_dir, exist_ok=True) ## TODO mv to _extract_archive?
 
         self._extract_archive(downloaded_path, extract_dir, lower, fail)
 
