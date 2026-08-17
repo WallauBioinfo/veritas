@@ -25,7 +25,7 @@ class ArtefactClass:
       - `download`: stream a signed URL to disk, verified by size + SHA-256.
       - `prepare_rtg_sdf`: unpack a downloaded RTG SDF archive, or accept one
         already extracted.
-      - `install_truth_vcf_index`: place a downloaded `.tbi` where tabix expects
+      - `enforce_truth_vcf_index`: place a downloaded `.tbi` where tabix expects
         it, adjacent to the truth VCF it indexes.
 
     Parameters
@@ -144,8 +144,8 @@ class ArtefactClass:
             Manifest file entry.
         written : int
             Total bytes written to disk.
-        digest : hashlib._Hash
-            Completed `sha256` hashing object.
+        digest : str
+            Finalized SHA-256 hexadecimal digest string.
         fail : ErrorFactory
             Bound error factory instance.
 
@@ -160,11 +160,10 @@ class ArtefactClass:
                 f"Truncated download: expected {artefact.size} bytes, received {written}.",
             )
 
-        computed = digest.hexdigest()
-        if computed != artefact.sha256:
+        if digest != artefact.sha256:
             raise fail(
                 StatusClass.CHECKSUM_MISMATCH,
-                f"SHA-256 mismatch: expected {artefact.sha256[:12]}…, got {computed[:12]}….",
+                f"SHA-256 mismatch: expected {artefact.sha256[:12]}…, got {digest[:12]}….",
             )
 
     @classmethod
@@ -178,9 +177,9 @@ class ArtefactClass:
 
         Parameters
         ----------
-        archive_path : Path
+        archive : Path
             Path to compressed archive on disk.
-        destination_path : Path
+        destination : Path
             Target destination directory path.
         lower : str
             Lowercased filename string for extension checking.
@@ -254,7 +253,7 @@ class ArtefactClass:
         artefact: ManifestFile,
         dest_path: Path,
         deadline: Optional[float] = None,
-    ) -> str:
+    ) -> Path:
         """Stream one manifest artefact to disk, hashing as it goes.
 
         Writes to `<dest_path>.part` and renames only after size and SHA-256
@@ -268,7 +267,7 @@ class ArtefactClass:
         artefact : ManifestFile
             Manifest metadata entry containing target URL, expected SHA-256,
             and size.
-        dest_path : str
+        dest_path : Path
             Final destination filesystem path for the downloaded file.
         deadline : float, optional
             Monotonic time limit (`time.monotonic()`). Checked between chunks so
@@ -293,7 +292,7 @@ class ArtefactClass:
             logger.info("Skipping download role=%s; cached file verified at %s", artefact.role, dest_path)
             return dest_path
 
-        tmp_path = dest_path.parent / f"{dest_path}.part"
+        tmp_path = dest_path.parent / f"{dest_path.name}.part"
         dest_path.parent.mkdir(parents=True, exist_ok=True)
         logger.info("Downloading role=%s -> %s", artefact.role, dest_path)
 
@@ -399,7 +398,7 @@ class ArtefactClass:
     def prepare_rtg_sdf(
         self, 
         downloaded_path: str | Path, 
-        extract_dir: str | Path) -> str:
+        extract_dir: str | Path) -> Path:
         """Ensure `--rtg-reference` points at a valid RTG SDF directory structure.
 
         Accepts an already-extracted directory or an archive (`.tar.gz`, `.tgz`,
@@ -480,16 +479,16 @@ class ArtefactClass:
         if expected.exists():
             return
         if tbi_downloaded.exists():
-            tbi_downloaded.replace(tbi_downloaded)
+            tbi_downloaded.replace(expected)
 
 
     @staticmethod
-    def _file_sha256(path: str) -> str:
+    def _file_sha256(path: str | Path) -> str:
         """Compute SHA-256 hex digest of an existing file using constant memory.
 
         Parameters
         ----------
-        path : str
+        path : str | Path
             File path on disk.
 
         Returns
@@ -511,7 +510,5 @@ class ArtefactClass:
         """
         try:
             path.unlink(missing_ok=True)
-        except FileNotFoundError:
-            pass
         except OSError as e:
             logger.warning("Could not remove partial file %s: %s", path, e)
