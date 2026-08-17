@@ -133,7 +133,7 @@ class ArtefactClass:
     def _verify_written(
         artefact: ManifestFile,
         written: int,
-        digest: "hashlib._Hash",
+        digest: str,
         fail: ErrorFactory,
     ) -> None:
         """Verify completed download size and SHA-256 against manifest declared metadata.
@@ -328,17 +328,17 @@ class ArtefactClass:
     def _stream_to_disk(
         self,
         artefact: ManifestFile,
-        tmp_path: str,
+        tmp_path: Path,
         deadline: Optional[float],
         fail: ErrorFactory,
-    ) -> tuple[int, "hashlib._Hash"]:
+    ) -> tuple[int, str]:
         """Perform the HTTP GET request and write response body to disk chunk by chunk.
 
         Parameters
         ----------
         artefact : ManifestFile
             Manifest metadata entry describing target artefact URL and size.
-        tmp_path : str
+        tmp_path : Path
             Temporary `.part` path to store in-progress download bytes.
         deadline : float or None
             Monotonic time limit threshold.
@@ -347,10 +347,10 @@ class ArtefactClass:
 
         Returns
         -------
-        tuple of (int, hashlib._Hash)
+        tuple of (int, str)
             A 2-element tuple containing:
             - `written` : Total count of bytes written to disk.
-            - `digest` : Update-in-progress `hashlib` SHA-256 object.
+            - `digest` : Finalized SHA-256 hex string.
 
         Raises
         ------
@@ -358,7 +358,7 @@ class ArtefactClass:
             On HTTP error response, mid-transfer timeout, transport failure,
             or OS write error.
         """
-        digest = hashlib.sha256()
+        sha256 = hashlib.sha256()
         written = 0
 
         try:
@@ -366,22 +366,18 @@ class ArtefactClass:
                 artefact.url,
                 stream=True,
                 timeout=(self.connect_timeout_s, self.read_timeout_s),
-                # Identity encoding is mandatory: if a proxy gzips the stream,
-                # requests transparently inflates it and the SHA-256 we compute
-                # no longer matches the one frozen in manifest.
                 headers={"Accept-Encoding": "identity"},
-                # Signed URLs carry their own auth; never leak OIDC bearer tokens.
                 auth=None,
             ) as response:
                 if response.status_code >= 400:
                     fail.raise_for_http(response.status_code, HttpSurface.ARTEFACT, context="artefact download")
 
-                with open(tmp_path, "wb") as fh:
+                with tmp_path.open("wb") as fh:
                     for chunk in response.iter_content(chunk_size=self.chunk_bytes):
                         if not chunk:
                             continue
                         fh.write(chunk)
-                        digest.update(chunk)
+                        sha256.update(chunk)
                         written += len(chunk)
                         self._check_stream_invariants(artefact, written, deadline, fail)
                     fh.flush()
@@ -396,8 +392,7 @@ class ArtefactClass:
         except OSError as e:
             raise fail(StatusClass.CONFIG_ERROR, f"Cannot write to disk: {e}") from e
 
-        return written, digest
-
+        return written, sha256.hexdigest()
     
     # ---------------------------------------------------------- rtg sdf prep
 
@@ -464,23 +459,28 @@ class ArtefactClass:
 
     
     # -------------------------------------------------------- truth vcf index
-
-    def install_truth_vcf_index(self, truth_vcf_path: str, tbi_path: str) -> None:
+    
+    @staticmethod
+    def enforce_truth_vcf_index(truth_vcf_path: str | Path, tbi_path: str | Path) -> None:
         """Place the truth VCF tabix index adjacent to the target VCF file.
 
         Parameters
         ----------
-        truth_vcf_path : str
+        truth_vcf_path : str | Path
             Path to the truth VCF file (`.vcf.gz`).
-        tbi_path : str
+        tbi_path : str | Path
             Path to downloaded tabix index file (`.tbi`).
         """
-        expected = f"{truth_vcf_path}.tbi"
-        if os.path.abspath(tbi_path) == os.path.abspath(expected):
+        
+        truth_vcf = Path(truth_vcf_path).resolve()
+        tbi_downloaded = Path(tbi_path).resolve()
+        
+        expected = truth_vcf.parent / f"{truth_vcf.name}.tbi"
+        
+        if expected.exists():
             return
-        if os.path.exists(expected):
-            os.remove(expected)
-        shutil.copy2(tbi_path, expected)
+        if tbi_downloaded.exists():
+            tbi_downloaded.replace(tbi_downloaded)
 
 
     @staticmethod
