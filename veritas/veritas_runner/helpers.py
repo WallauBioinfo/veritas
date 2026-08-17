@@ -94,3 +94,36 @@ def _validate_prerequisites(
             f"Workspace '{workdir}' is not writable.",
             attempt_id=attempt_id,
         )
+
+def _validate_workdir(
+    attempt_id: str,
+    workdir: str | Path,
+    api_url: str,
+    oidc_token: str,
+) -> Path:
+    """Validate environment prerequisites and return a canonical workdir Path."""
+    if not attempt_id:
+        raise VeritasRunnerError(
+            failure_class=StatusClass.CONFIG_ERROR,
+            message="attempt_id is required.",
+        )
+
+    workdir_path = Path(workdir).resolve()
+
+    try:
+        workdir_path.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        raise VeritasRunnerError(
+            failure_class=StatusClass.CONFIG_ERROR,
+            message=f"Cannot create workdir at '{workdir_path}': {e}",
+        ) from e
+
+    if not workdir_path.is_dir():
+        raise VeritasRunnerError(
+            failure_class=StatusClass.CONFIG_ERROR,
+            message=f"workdir is not a directory: {workdir_path}",
+        )
+
+    # Validate API URL and tokens...
+
+    return workdir_path

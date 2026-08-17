@@ -252,7 +252,7 @@ class ArtefactClass:
     def download(
         self,
         artefact: ManifestFile,
-        dest_path: str,
+        dest_path: Path,
         deadline: Optional[float] = None,
     ) -> str:
         """Stream one manifest artefact to disk, hashing as it goes.
@@ -277,7 +277,7 @@ class ArtefactClass:
 
         Returns
         -------
-        str
+        Path
             The verified path to the downloaded file (`dest_path`).
 
         Raises
@@ -287,31 +287,32 @@ class ArtefactClass:
             exceeded, or filesystem write fails.
         """
         fail = self._error.bind(prefix=f"role={artefact.role}")
+        dest_path = Path(dest_path)
 
         if self._is_cached(dest_path, artefact.sha256):
             logger.info("Skipping download role=%s; cached file verified at %s", artefact.role, dest_path)
             return dest_path
 
-        tmp_path = f"{dest_path}.part"
-        os.makedirs(os.path.dirname(os.path.abspath(dest_path)), exist_ok=True)
+        tmp_path = dest_path.parent / f"{dest_path}.part"
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
         logger.info("Downloading role=%s -> %s", artefact.role, dest_path)
 
         try:
             written, digest = self._stream_to_disk(artefact, tmp_path, deadline, fail)
             self._verify_written(artefact, written, digest, fail)
-            os.replace(tmp_path, dest_path)
+            tmp_path.replace(dest_path)
             logger.info("Verified role=%s (%d bytes)", artefact.role, written)
             return dest_path
         except Exception:
             self._discard_partial(tmp_path)
             raise
 
-    def _is_cached(self, dest_path: str, expected_sha256: str) -> bool:
+    def _is_cached(self, dest_path: Path, expected_sha256: str) -> bool:
         """Check if target path already exists on disk with matching content hash.
 
         Parameters
         ----------
-        dest_path : str
+        dest_path : Path
             Path to check on disk.
         expected_sha256 : str
             Expected SHA-256 hex digest string.
@@ -322,7 +323,7 @@ class ArtefactClass:
             `True` if file exists and SHA-256 digest matches `expected_sha256`,
             `False` otherwise.
         """
-        return os.path.isfile(dest_path) and self._file_sha256(dest_path) == expected_sha256
+        return dest_path.is_file() and self._file_sha256(dest_path) == expected_sha256
 
     def _stream_to_disk(
         self,
@@ -481,7 +482,6 @@ class ArtefactClass:
             os.remove(expected)
         shutil.copy2(tbi_path, expected)
 
-    # ---------------------------------------------------------------- misc
 
     @staticmethod
     def _file_sha256(path: str) -> str:
@@ -501,16 +501,16 @@ class ArtefactClass:
             return hashlib.file_digest(fh, "sha256").hexdigest()
 
     @staticmethod
-    def _discard_partial(path: str) -> None:
-        """Best-effort cleanup of temporary `.part` file.
+    def _discard_partial(path: Path) -> None:
+        """Silently attempt to clean up temporary .part download artifacts on error.
 
         Parameters
         ----------
-        path : str
+        path : Path
             Path to partial file to remove.
         """
         try:
-            os.remove(path)
+            path.unlink(missing_ok=True)
         except FileNotFoundError:
             pass
         except OSError as e:
