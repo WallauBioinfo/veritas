@@ -1,18 +1,13 @@
 # veritas_runner/runner.py
 #
-# Orchestration for one ExecutionAttempt. This module owns two things the
-# transport modules deliberately do not:
+# Orchestration for one ExecutionAttempt.
 #
-#   1. PHASE BOUNDARIES. Before a manifest exists, no callback is possible.
-#      After it exists, every outcome is reportable.
-#   2. THE SEQUENTIAL SAMPLE LOOP, with per-sample callbacks and a deadline
+#   1. SEQUENTIAL SAMPLE LOOP, with per-sample callbacks and a deadline
 #      guard so a stall becomes `Partial` rather than a silent hard kill.
+#   2. Request-level retry lives in veritas_runner.retry and is optional: set
+#      VERITAS_AUTO_RETRY=0 to disable it. Attempt-level retry (a new attempt_id and a
+#      new workflow_dispatch) is PathoEQA's responsibility
 #
-# Request-level retry lives in veritas_runner.retry and is optional: set
-# VERITAS_AUTO_RETRY=0 to disable it, or delete that module and stub
-# with_auto_retry to a single call. Attempt-level retry (a new attempt_id and a
-# new workflow_dispatch) is PathoEQA's responsibility and is never simulated here.
-
 
 from __future__ import annotations
 

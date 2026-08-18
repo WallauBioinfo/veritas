@@ -1,5 +1,4 @@
-from typing import Any, List, Optional, Self, Literal, Dict
-from pandas.core.arrays.arrow.accessors import ListAccessor
+from typing import List, Optional, Self, Literal, Dict
 from pydantic import BaseModel, Field, model_validator, field_validator
 
 
