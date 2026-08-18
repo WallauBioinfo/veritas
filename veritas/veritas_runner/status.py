@@ -1,9 +1,5 @@
 """
 Single source of truth for the runner's failure taxonomy.
-
-Previously `action_status.py`; the module is now `status.py` and every other
-module imports `StatusClass` from here. Nothing else in the package may invent
-a failure string: if a condition is not in this enum, it is INTERNAL_ERROR.
 """
 
 from enum import Enum
@@ -12,18 +8,11 @@ from enum import Enum
 class StatusClass(str, Enum):
     """
     Failure taxonomy for one ExecutionAttempt.
-
-    Naming note: the specs use "tentativa" in two unrelated senses.
-    - "nova tentativa" / "tentativa sem callback" = the ExecutionAttempt entity
-      (carries attempt_id, owned by PathoEQA, terminal state is immutable).
-    - "no máximo duas tentativas automáticas" = automatic *retries* of a single
-      transient operation. This is request-level and owned by the runner.
-    `transient` below refers to the second sense only: whether the runner may
-    re-issue the same HTTP request in-process. It never implies re-dispatching
-    the attempt — only PathoEQA mints a new attempt_id.
     """
 
     SUCCESS = "success"
+
+    ## TODO: Fix all this. Class values do not align with SPEC.
 
     # Phase 1 - preflight: resolving attempt_id, auth, manifest, downloading inputs.
     # Caller/attempt-data problem - PathoEQA must fix the request; no retry helps.
