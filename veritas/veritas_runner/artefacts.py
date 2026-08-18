@@ -476,10 +476,7 @@ class ArtefactClass:
         
         expected = truth_vcf.parent / f"{truth_vcf.name}.tbi"
         
-        if expected.exists():
-            return
-        if tbi_downloaded.exists():
-            tbi_downloaded.replace(expected)
+        shutil.copy2(tbi_downloaded, expected)
 
 
     @staticmethod

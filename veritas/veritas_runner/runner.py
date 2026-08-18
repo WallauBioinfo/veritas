@@ -29,7 +29,7 @@ import requests
 
 from veritas_runner.artefacts import (
     download_artefact,
-    install_truth_vcf_index,
+    enforce_truth_vcf_index,
     prepare_rtg_sdf,
 )
 from veritas_runner.datamodels import CallbackEnvelope, Manifest, SampleInput
@@ -177,7 +177,7 @@ def _materialize_sample(
     )
 
     if "truth_tbi" in paths:
-        install_truth_vcf_index(paths["truth_vcf"], paths["truth_tbi"])
+        enforce_truth_vcf_index(paths["truth_vcf"], paths["truth_tbi"])
 
     return paths
 
@@ -277,6 +277,12 @@ def _process_sample(
         outcome = SampleOutcome(sample.sample_run_id, StatusClass.SUCCESS)
     except VeritasRunnerError as e:
         outcome = SampleOutcome(sample.sample_run_id, e.failure_class, str(e))
+    except Exception as e:
+        wrapped = VeritasRunnerError.wrap(
+            e, context=f"processing sample {sample.sample_run_id}",
+            attempt_id=attempt_id, sample_run_id=sample.sample_run_id,
+        )
+        outcome = SampleOutcome(sample.sample_run_id, wrapped.failure_class, str(wrapped))
 
     outcome.duration_ms = int((time.monotonic() - started) * 1000)
 
