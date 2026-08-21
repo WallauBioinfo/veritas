@@ -1,6 +1,7 @@
 from typing import List, Optional, Self, Literal, Dict
 from pydantic import BaseModel, Field, model_validator, field_validator
-
+from dataclasses import dataclass, field
+from status import StatusClass
 
 class ManifestFile(BaseModel):
     role: str
@@ -157,3 +158,29 @@ class CallbackPayload(BaseModel):
     failure_class: str
     detail: str
     duration_seconds: Optional[float] = None
+
+
+@dataclass
+class SampleOutcome:
+    sample_run_id: str
+    status: StatusClass
+    message: str = ""
+    duration_ms: int = 0
+
+    @property
+    def success(self) -> bool:
+        return self.status is StatusClass.SUCCESS
+
+
+@dataclass
+class AttemptResult:
+    attempt_id: str
+    terminal_state: Literal["Completed", "Partial", "Failed"]
+    status: StatusClass
+    duration_ms: int
+    veritas_version: str
+    samples: List[SampleOutcome] = field(default_factory=list)
+
+    @property
+    def exit_code(self) -> int:
+        return self.status.exit_code

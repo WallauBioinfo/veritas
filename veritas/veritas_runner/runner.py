@@ -2,11 +2,10 @@
 #
 # Orchestration for one ExecutionAttempt.
 #
-#   1. SEQUENTIAL SAMPLE LOOP, with per-sample callbacks and a deadline
-#      guard so a stall becomes `Partial` rather than a silent hard kill.
-#   2. Request-level retry lives in veritas_runner.retry and is optional: set
-#      VERITAS_AUTO_RETRY=0 to disable it. Attempt-level retry (a new attempt_id and a
-#      new workflow_dispatch) is PathoEQA's responsibility
+#   1. PHASE BOUNDARIES. Phase 1a (manifest fetch) failure exits via code.
+#      Phase 1b+ failures are reported via PathoEQA callbacks.
+#   2. SEQUENTIAL SAMPLE LOOP, with per-sample callbacks and deadline guard.
+#   3. Request-level retry lives in veritas_runner.retry.
 #
 
 from __future__ import annotations
@@ -16,7 +15,6 @@ import os
 import subprocess
 import time
 import uuid
-from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import List, Optional
 
@@ -27,53 +25,23 @@ from veritas_runner.artefacts import (
     enforce_truth_vcf_index,
     prepare_rtg_sdf,
 )
-from veritas_runner.datamodels import CallbackEnvelope, Manifest, SampleInput
+from veritas_runner.datamodels import CallbackEnvelope, Manifest, SampleInput, SampleOutcome, AttemptResult
 from veritas_runner.exceptions import VeritasRunnerError
 from veritas_runner.helpers import _validate_prerequisites
 from veritas_runner.pathoeqa import PathoEQAClient
-from veritas_runner.retry import with_auto_retry  # remove this line to drop retries
+from veritas_runner.retry import with_auto_retry
 from veritas_runner.status import StatusClass
 
 logger = logging.getLogger(__name__)
 
 CALLBACK_SCHEMA_VERSION = os.environ.get("VERITAS_CALLBACK_SCHEMA_VERSION", "1.0")
 
-# Optional region BED files — passed to veritas validate only when downloaded.
 _BED_CLI_FLAGS = {
     "primer_bed": "--primerd-bed",
     "mask_bed": "--mask-bed",
     "low_cov_truth_bed": "--low-cov-truth-bed",
     "low_cov_query_bed": "--low-cov-query-bed",
 }
-
-
-# --------------------------------------------------------------------- results
-
-
-@dataclass
-class SampleOutcome:
-    sample_run_id: str
-    status: StatusClass
-    message: str = ""
-    duration_ms: int = 0
-
-    @property
-    def ok(self) -> bool:
-        return self.status is StatusClass.SUCCESS
-
-
-@dataclass
-class AttemptResult:
-    attempt_id: str
-    terminal_state: str  # "Completed" | "Partial" | "Failed"
-    status: StatusClass
-    duration_ms: int
-    veritas_version: str
-    samples: List[SampleOutcome] = field(default_factory=list)
-
-    @property
-    def exit_code(self) -> int:
-        return self.status.exit_code
 
 
 # ------------------------------------------------------------------- reporting
@@ -282,11 +250,11 @@ def _process_sample(
     outcome.duration_ms = int((time.monotonic() - started) * 1000)
 
     reporter.emit(
-        "sample_completed" if outcome.ok else "sample_failed",
+        "sample_completed" if outcome.success else "sample_failed",
         sample_run_id=sample.sample_run_id,
         payload={
             "duration_ms": outcome.duration_ms,
-            **({} if outcome.ok else {"failure_class": outcome.status.value, "detail": outcome.message[:2000]}),
+            **({} if outcome.success else {"failure_class": outcome.status.value, "detail": outcome.message[:2000]}),
         },
         deadline=deadline,
         best_effort=True,
@@ -305,7 +273,7 @@ def run_attempt(
     """
     Execute one ExecutionAttempt end to end and return its terminal state.
 
-    Terminal states, per SPEC-05: Completed (all samples ok), Partial (some ok,
+    Terminal states, per SPEC-05: Completed (all samples success), Partial (some success,
     then a stop), Failed (nothing usable). Terminal is immutable - the runner
     reports once and exits. It never re-dispatches itself.
     """
@@ -374,7 +342,7 @@ def run_attempt(
                 )
                 break
 
-        succeeded = [o for o in outcomes if o.ok]
+        succeeded = [s for s in outcomes if s.success]
         unprocessed = len(manifest.samples) - len(outcomes)
 
         if succeeded and len(succeeded) == len(manifest.samples):
