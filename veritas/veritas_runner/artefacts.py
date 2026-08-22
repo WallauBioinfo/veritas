@@ -77,19 +77,16 @@ class ArtefactClass:
         self._error = ErrorFactory(attempt_id=attempt_id)
 
         self.connect_timeout_s = (
-            connect_timeout_s
-            if connect_timeout_s is not None
-            else float(os.environ.get("VERITAS_DOWNLOAD_CONNECT_TIMEOUT", self.DEFAULT_CONNECT_TIMEOUT_S))
+            connect_timeout_s if connect_timeout_s is not None
+            else float(os.getenv("VERITAS_DOWNLOAD_CONNECT_TIMEOUT", self.DEFAULT_CONNECT_TIMEOUT_S))
         )
         self.read_timeout_s = (
-            read_timeout_s
-            if read_timeout_s is not None
-            else float(os.environ.get("VERITAS_DOWNLOAD_READ_TIMEOUT", self.DEFAULT_READ_TIMEOUT_S))
+            read_timeout_s if read_timeout_s is not None
+            else float(os.getenv("VERITAS_DOWNLOAD_READ_TIMEOUT", self.DEFAULT_READ_TIMEOUT_S))
         )
         self.chunk_bytes = (
-            chunk_bytes
-            if chunk_bytes is not None
-            else int(os.environ.get("VERITAS_DOWNLOAD_CHUNK_BYTES", self.DEFAULT_CHUNK_BYTES))
+            chunk_bytes if chunk_bytes is not None
+            else int(os.getenv("VERITAS_DOWNLOAD_CHUNK_BYTES", self.DEFAULT_CHUNK_BYTES))
         )
 
     @staticmethod

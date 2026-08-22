@@ -12,11 +12,15 @@ from __future__ import annotations
 
 import logging
 import os
+from posix import P_ALL
 import subprocess
+from sys import path
 import time
 import uuid
 from datetime import datetime, timezone
 from typing import List, Optional
+from pathlib import Path
+from veritas.veritas_runner.datamodels import ManifestFile
 
 import requests
 
@@ -31,6 +35,7 @@ from veritas_runner.helpers import _validate_prerequisites
 from veritas_runner.pathoeqa import PathoEQAClient
 from veritas_runner.retry import with_auto_retry
 from veritas_runner.status import StatusClass
+from veritas_runner.artefacts import ArtefactClass
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +53,19 @@ _BED_CLI_FLAGS = {
 
 
 class AttemptReporter:
-    """Builds and delivers CallbackEnvelopes for one attempt."""
+    """
+    Build and deliver CallbackEnvelopes for a single execution attempt.
+
+    Parameters
+    ----------
+    client : PathoEQAClient
+        Active API client instance used to transmit HTTP callback envelopes.
+    attempt_id : str
+        Unique identifier binding emitted events to the current execution attempt.
+    workflow_run_id : int
+        Platform workflow execution identifier (e.g., GitHub Actions run ID).
+
+    """"""Builds and delivers CallbackEnvelopes for one attempt."""
 
     def __init__(self, client: PathoEQAClient, attempt_id: str, workflow_run_id: int):
         self.client = client
@@ -64,6 +81,28 @@ class AttemptReporter:
         deadline: Optional[float] = None,
         best_effort: bool = False,
     ) -> None:
+        """
+        Send a structured callback envelope to PathoEQA.
+
+        Parameters
+        ----------
+        event_type : str
+            Lifecycle event name (e.g., 'sample_completed').
+        sample_run_id : str, optional
+            Target sample run ID, if applicable.
+        payload : dict, optional
+            Event payload data.
+        deadline : float, optional
+            Monotonic time threshold for retries.
+        best_effort : bool, default=False
+            If True, drop delivery failures as warnings instead of raising.
+
+        Raises
+        ------
+        VeritasRunnerError
+            If delivery fails and `best_effort` is False.
+        """
+
         envelope = CallbackEnvelope(
             schema_version=CALLBACK_SCHEMA_VERSION,
             event_id=str(uuid.uuid4()),
@@ -82,9 +121,7 @@ class AttemptReporter:
             )
         except VeritasRunnerError:
             if not best_effort:
-                raise
-            # Progress callbacks are advisory. Losing one must not abort a run
-            # that is otherwise healthy; the terminal callback carries the truth.
+               raise
             logger.warning("Dropped advisory callback %s", event_type)
 
 
@@ -97,50 +134,74 @@ def _materialize_sample(
     session: requests.Session,
     attempt_id: str,
     deadline: Optional[float],
-) -> dict:
+) -> dict[str, Path]:
     """
-    Phase 1b, per sample. Downloads the truth bundle and the query input into a
-    dedicated directory. Downloads are sequential and per-sample rather than
-    up-front, so a Partial attempt never pays to fetch inputs for samples it
-    will not reach.
+    Download and prepare all input artefacts for a single sample execution.
+
+    Materializes the truth bundle, query input, and optional region annotations
+    into a dedicated sample subdirectory. Inputs are fetched lazily at sample
+    execution time, and artefacts are downloaded sequentially for each sample.
+    Local caching, file existence checks, and deduplication are handled internally
+    by `ArtefactClass.download`. Also manages post-download preparation for RTG
+    SDF reference directories and VCF index verification.
+
+    Parameters
+    ----------
+    sample : SampleInput
+        Manifest and metadata for the sample run to materialize.
+    workdir : str
+        Base directory path under which the sample-specific directory is created.
+    session : requests.Session
+        Active HTTP session used for artefact network downloads.
+    attempt_id : str
+        Unique identifier for the current execution attempt.
+    deadline : float, optional
+        Monotonic time threshold (`time.monotonic()`) for download retries.
+
+    Returns
+    -------
+    dict[str, Path]
+        Mapping of artefact roles (e.g., `'truth_vcf'`, `'query_input'`,
+        `'rtg_sdf'`) to their resolved local `Path` locations on disk.
+
+    Raises
+    ------
+    VeritasRunnerError
+        If any artefact download fails after exhausting retries or if RTG SDF
+        preparation fails.
     """
-    sample_dir = os.path.join(workdir, sample.sample_run_id)
-    paths: dict = {}
+    artefact_handler = ArtefactClass(session=session, attempt_id=attempt_id)
+    
+    sample_dir = Path(workdir) / sample.sample_run_id
+    
+    to_fetch: list[ManifestFile] = [*sample.truth_bundle.files, sample.query_input]
 
-    to_fetch = list(sample.truth_bundle.files) + [sample.query_input]
-    if sample.region_annotations is not None:
-        to_fetch += [
-            f
-            for f in (
-                sample.region_annotations.primer_bed,
-                sample.region_annotations.mask_bed,
-                sample.region_annotations.low_cov_truth_bed,
-                sample.region_annotations.low_cov_query_bed,
-            )
-            if f is not None
-        ]
+    if sample.region_annotations:
+        ann = sample.region_annotations
+        to_fetch.extend(filter(None, [ann.primer_bed, ann.mask_bed, ann.low_cov_truth_bed, ann.low_cov_query_bed]))
 
+    paths: dict[str, Path] = {}
+    
     for artefact in to_fetch:
-        dest = os.path.join(
-            sample_dir,
-            f"{artefact.role}_{os.path.basename(artefact.url.split('?')[0])}",
-        )
-        paths[artefact.role] = with_auto_retry(
-            lambda a=artefact, d=dest: download_artefact(
-                a, d, session=session, attempt_id=attempt_id, deadline=deadline
-            ),
+        filename = artefact.url.split("?")[0].rsplit("/", 1)[-1]
+        dest = sample_dir / f"{artefact.role}_{filename}"
+        
+        fetched = with_auto_retry(
+            lambda : artefact_handler.download(artefact, dest, deadline=deadline),
             description=f"download {artefact.role}",
             deadline=deadline,
         )
+        paths[artefact.role] = fetched
 
-    paths["rtg_sdf"] = prepare_rtg_sdf(
-        paths["rtg_sdf"],
-        os.path.join(sample_dir, "rtg_sdf"),
-        attempt_id=attempt_id,
-    )
+    if "rtg_sdf" in paths:
+        paths["rtg_sdf"] = prepare_rtg_sdf(
+            paths["rtg_sdf"],
+            sample_dir / "rtg_sdf",
+            attempt_id=attempt_id,
+        )
 
     if "truth_tbi" in paths:
-        enforce_truth_vcf_index(paths["truth_vcf"], paths["truth_tbi"])
+        artefact_handler.enforce_truth_vcf_index(paths["truth_vcf"], paths["truth_tbi"])
 
     return paths
 
