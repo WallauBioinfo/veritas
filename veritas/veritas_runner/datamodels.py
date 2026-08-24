@@ -89,13 +89,15 @@ class SampleInput(BaseModel):
     region_annotations: Optional[RegionAnnotations] = None
 
     @model_validator(mode="after")
-    def check_query_input_role_matches_type(self) -> Self:
+    def check_input_role_and_fasta(self) -> Self:
         expected_role = f"query_{self.query_type}"
         if self.query_input.role != expected_role:
             raise ValueError(
                 f"query_type is '{self.query_type}' but query_input.role is "
                 f"'{self.query_input.role}' (expected '{expected_role}')"
             )
+        if self.query_type == "fasta" and "reference_fasta" not in self.truth_bundle.files_by_role:
+            raise ValueError("query_type 'fasta' requires 'reference_fasta' in truth_bundle.files")
         return self
 
     
