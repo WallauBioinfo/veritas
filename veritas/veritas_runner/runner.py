@@ -213,7 +213,6 @@ class ExecutionAttempt:
         return outcome
 
 
-
 def _run_veritas(paths: dict, output_dir: str, timeout_s: int) -> None:
     """
     Phase 2. Supervises the veritas subprocess. Concerned only with what a
@@ -224,12 +223,7 @@ def _run_veritas(paths: dict, output_dir: str, timeout_s: int) -> None:
     if "query_vcf" in paths:
         cmd += ["--query-vcf", paths["query_vcf"]]
     if "query_fasta" in paths:
-        cmd += [
-            "--query-fasta",
-            paths["query_fasta"],
-            "--reference",
-            paths["reference_fasta"],
-        ]
+        cmd += ["--query-fasta", paths["query_fasta"], "--reference", paths["reference_fasta"]]
     cmd += ["--truth-vcf", paths["truth_vcf"], "--rtg-reference", paths["rtg_sdf"]]
 
     for role, flag in _BED_CLI_FLAGS.items():
@@ -241,17 +235,17 @@ def _run_veritas(paths: dict, output_dir: str, timeout_s: int) -> None:
     except subprocess.TimeoutExpired as e:
         raise VeritasRunnerError(
             failure_class=StatusClass.TIMEOUT,
-            message=f"veritas validate exceeded {timeout_s}s and was terminated.",
+            message=f"Veritas validate exceeded {timeout_s}s and was terminated.",
         ) from e
     except FileNotFoundError as e:
         raise VeritasRunnerError(
             failure_class=StatusClass.CONFIG_ERROR,
-            message="veritas executable not found on PATH.",
+            message="Veritas executable not found on PATH.",
         ) from e
     except subprocess.CalledProcessError as e:
         raise VeritasRunnerError(
             failure_class=StatusClass.VERITAS_CRASHED,
-            message=f"veritas validate exited with code {e.returncode}.",
+            message=f"Veritas validate exited with code {e.returncode}.",
         ) from e
 
 
@@ -277,8 +271,6 @@ def _veritas_version() -> str:
 
 
 # --------------------------------------------------------------- the sample loop
-
-
 
 
 def run_attempt(

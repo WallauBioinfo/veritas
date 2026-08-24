@@ -37,7 +37,7 @@ class TruthBundle(BaseModel):
     @model_validator(mode="after")
     def check_required_roles_present(self) -> Self: #TODO require Python 3.11+
         found_roles = {f.role for f in self.files}
-        required_truth_roles = {"reference_fasta", "truth_vcf", "truth_tbi", "rtg_sdf"} # TODO: low_cov.bed as requirement?
+        required_truth_roles = {"truth_vcf", "truth_tbi", "rtg_sdf"} # TODO: low_cov.bed as requirement?
         missing_roles = required_truth_roles - found_roles
         
         if missing_roles:
