@@ -15,7 +15,7 @@ from veritas_runner.status import StatusClass
 
 def _validate_prerequisites(
     attempt_id: str,
-    workdir: str,
+    workdir: str | Path,
     api_url: str,
     oidc_token: str,
 ) -> None:
@@ -125,5 +125,8 @@ def _validate_workdir(
         )
 
     # Validate API URL and tokens...
+
+
+    #TODO: accept workdir as Path
 
     return workdir_path
