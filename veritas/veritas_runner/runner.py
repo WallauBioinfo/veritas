@@ -107,7 +107,11 @@ class ExecutionAttempt:
 
         sample_dir = self.workdir / sample.sample_run_id
 
-        to_fetch: list[ManifestFile] = [*sample.truth_bundle.files, sample.query_input]
+        required_truth_roles = {"truth_vcf", "truth_tbi", "rtg_sdf"}
+        if sample.query_type == "fasta":
+            required_truth_roles.add("reference_fasta")
+
+        to_fetch: list[ManifestFile] = [f for f in sample.truth_bundle.files if f.role in required_truth_roles] + [sample.query_input]
 
         if sample.region_annotations:
             ann = sample.region_annotations
