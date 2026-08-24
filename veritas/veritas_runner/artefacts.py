@@ -7,7 +7,7 @@ import shutil
 import tarfile
 import time
 import zipfile
-from typing import Optional
+from typing import Optional, ClassVar
 from pathlib import Path
 import requests
 
@@ -58,11 +58,11 @@ class ArtefactClass:
         Resolved chunk buffer size in bytes.
     """
 
-    _ARCHIVE_SUFFIXES = (".tar.gz", ".tgz", ".tar", ".zip")
+    _ARCHIVE_SUFFIXES: ClassVar[tuple[str,...]] = (".tar.gz", ".tgz", ".tar", ".zip")
 
-    DEFAULT_CONNECT_TIMEOUT_S: float = 10.0
-    DEFAULT_READ_TIMEOUT_S: float = 60.0
-    DEFAULT_CHUNK_BYTES: int = 4 * 1024 * 1024
+    DEFAULT_CONNECT_TIMEOUT_S: ClassVar[float] = 10.0
+    DEFAULT_READ_TIMEOUT_S: ClassVar[float] = 60.0
+    DEFAULT_CHUNK_BYTES: ClassVar[int] = 4 * 1024 * 1024
 
     def __init__(
         self,
@@ -294,10 +294,17 @@ class ArtefactClass:
         logger.info("Downloading role=%s -> %s", artefact.role, dest_path)
 
         try:
+            download_started = time.monotonic()
             written, digest = self._stream_to_disk(artefact, tmp_path, deadline, fail)
             self._verify_written(artefact, written, digest, fail)
+            duration_ms = int((time.monotonic() - download_started) * 1000)
             tmp_path.replace(dest_path)
-            logger.info("Verified role=%s (%d bytes)", artefact.role, written)
+            
+            logger.info(
+                "Verified role=%s (%d bytes in %dms)", 
+                artefact.role, written, duration_ms
+            )
+            
             return dest_path
         except Exception:
             self._discard_partial(tmp_path)

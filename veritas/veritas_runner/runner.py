@@ -17,21 +17,10 @@ from sys import path
 import time
 from typing import List, Optional
 from pathlib import Path
-
-from pandas.core.arrays import boolean
-from pandas.core.strings.accessor import NoNewAttributesMixin
-from pydantic_core.core_schema import NoneSchema
-from pytz.exceptions import NonExistentTimeError
-from veritas.veritas_runner.datamodels import ManifestFile
-
 import requests
 
-from veritas_runner.artefacts import (
-    download_artefact,
-    enforce_truth_vcf_index,
-    prepare_rtg_sdf,
-)
-from veritas_runner.datamodels import CallbackEnvelope, Manifest, SampleInput, SampleOutcome, AttemptResult
+from veritas.veritas_runner.datamodels import ManifestFile
+from veritas_runner.datamodels import Manifest, SampleInput, SampleOutcome, AttemptResult
 from veritas_runner.exceptions import VeritasRunnerError
 from veritas_runner.helpers import _validate_prerequisites
 from veritas_runner.pathoeqa import PathoEQAClient
@@ -101,15 +90,7 @@ class ExecutionAttempt:
         ----------
         sample : SampleInput
             Manifest and metadata for the sample run to materialize.
-        workdir : str
-            Base directory path under which the sample-specific directory is created.
-        session : requests.Session
-            Active HTTP session used for artefact network downloads.
-        attempt_id : str
-            Unique identifier for the current execution attempt.
-        deadline : float, optional
-            Monotonic time threshold (`time.monotonic()`) for download retries.
-
+    
         Returns
         -------
         dict[str, Path]
@@ -124,7 +105,7 @@ class ExecutionAttempt:
         """
         artefact_handler = ArtefactClass(session=self.session, attempt_id=self.attempt_id)
 
-        sample_dir = Path(self.workdir) / sample.sample_run_id
+        sample_dir = self.workdir / sample.sample_run_id
 
         to_fetch: list[ManifestFile] = [*sample.truth_bundle.files, sample.query_input]
 
@@ -146,7 +127,7 @@ class ExecutionAttempt:
             paths[artefact.role] = fetched
 
         if "rtg_sdf" in paths:
-            paths["rtg_sdf"] = prepare_rtg_sdf(
+            paths["rtg_sdf"] = artefact_handler.prepare_rtg_sdf(
                 paths["rtg_sdf"],
                 sample_dir / "rtg_sdf",
                 attempt_id=self.attempt_id,
@@ -163,43 +144,70 @@ class ExecutionAttempt:
         sample: SampleInput,
         per_sample_timeout_s: int,
     ) -> SampleOutcome:
-        started = time.monotonic()
-        output_dir = os.path.join(workdir, sample.sample_run_id, "output")
+        """
+        Execute the evaluation workflow for a single genomic sample.
 
-        reporter.emit(
+        Emits a start notification before downloading and preparing the sample's input
+        artefacts to disk. Runs the core Veritas benchmarking engine and validates
+        generated metrics unless operating in dry-run mode. Catches all internal and
+        unexpected exceptions, converting them into a standardized outcome model, and
+        delivers a terminal completion or failure callback.
+
+        Parameters
+        ----------
+        sample : SampleInput
+            Manifest, file specifications, and configuration metadata for the sample run.
+        per_sample_timeout_s : int
+            Maximum execution time allocated for the Veritas subprocess in seconds.
+
+        Returns
+        -------
+        SampleOutcome
+            Encapsulated result containing execution success status, duration in
+            milliseconds, and failure details or classification if an error occurred.
+        """
+        started = time.monotonic()
+        sample_run_id = sample.sample_run_id
+        output_dir = self.workdir.joinpath(sample_run_id, "output")
+
+        self.reporter.emit(
             "sample_started",
-            sample_run_id=sample.sample_run_id,
+            sample_run_id=sample_run_id,
             payload={"sample_order": sample.sample_order},
-            deadline=deadline,
+            deadline=self.deadline,
             best_effort=True,
         )
 
         try:
-            paths = _materialize_sample(sample, workdir, session, attempt_id, deadline)
-            if not dry_run:
-                os.makedirs(output_dir, exist_ok=True)
+            materialize_stated = time.monotonic()
+            paths = self._materialize_sample(sample)
+            materialize_duration_ms = int((time.monotonic() - materialize_stated) * 1000)
+            logger.debug("Materialized sample %s in %dms", sample_run_id, materialize_duration_ms)
+
+            if not self.dry_run:
+                output_dir.mkdir(exist_ok=True, parents=True)
                 _run_veritas(paths, output_dir, per_sample_timeout_s)
                 _check_metrics(output_dir)
-            outcome = SampleOutcome(sample.sample_run_id, StatusClass.SUCCESS)
+            outcome = SampleOutcome(sample_run_id, StatusClass.SUCCESS)
         except VeritasRunnerError as e:
-            outcome = SampleOutcome(sample.sample_run_id, e.failure_class, str(e))
+            outcome = SampleOutcome(sample_run_id, e.failure_class, str(e))
         except Exception as e:
             wrapped = VeritasRunnerError.wrap(
-                e, context=f"processing sample {sample.sample_run_id}",
-                attempt_id=attempt_id, sample_run_id=sample.sample_run_id,
+                e, context=f"processing sample {sample_run_id}",
+                attempt_id=self.attempt_id, sample_run_id=sample_run_id,
             )
             outcome = SampleOutcome(sample.sample_run_id, wrapped.failure_class, str(wrapped))
 
         outcome.duration_ms = int((time.monotonic() - started) * 1000)
 
-        reporter.emit(
+        self.reporter.emit(
             "sample_completed" if outcome.success else "sample_failed",
-            sample_run_id=sample.sample_run_id,
+            sample_run_id=sample_run_id,
             payload={
                 "duration_ms": outcome.duration_ms,
                 **({} if outcome.success else {"failure_class": outcome.status.value, "detail": outcome.message[:2000]}),
             },
-            deadline=deadline,
+            deadline=self.deadline,
             best_effort=True,
         )
         return outcome
