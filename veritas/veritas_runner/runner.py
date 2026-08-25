@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import os
+from re import S
 import subprocess
 from sys import path
 import time
@@ -21,7 +22,7 @@ import requests
 
 from veritas.veritas_runner.datamodels import ManifestFile
 from veritas_runner.datamodels import Manifest, SampleInput, SampleOutcome, AttemptResult
-from veritas_runner.exceptions import VeritasRunnerError
+from veritas_runner.exceptions import ErrorFactory, VeritasRunnerError
 from veritas_runner.helpers import _validate_prerequisites
 from veritas_runner.pathoeqa import PathoEQAClient
 from veritas_runner.retry import with_auto_retry
@@ -190,7 +191,8 @@ class ExecutionAttempt:
 
             if not self.dry_run:
                 output_dir.mkdir(exist_ok=True, parents=True)
-                _run_veritas(paths, output_dir, per_sample_timeout_s)
+                fail = ErrorFactory(attempt_id=self.attempt_id, sample_run_id=sample_run_id)
+                _run_veritas(paths, output_dir, per_sample_timeout_s, fail)
                 _check_metrics(output_dir)
             outcome = SampleOutcome(sample_run_id, StatusClass.SUCCESS)
         except VeritasRunnerError as e:
@@ -217,12 +219,45 @@ class ExecutionAttempt:
         return outcome
 
 
-def _run_veritas(paths: dict, output_dir: str, timeout_s: int) -> None:
+def _run_veritas(
+        paths: dict[str, Path], 
+        output_dir: str | Path, 
+        timeout_s: int,
+        fail: ErrorFactory
+    ) -> None:
+    """Supervise the Veritas  subprocess.
+
+    Relies on upstream boundary validation for input correctness; maps 
+    subprocess exit codes and system failures to domain-specific 
+    ``StatusClass`` exceptions via the provided error factory.
+
+    Parameters
+    ----------
+    paths : dict of str to pathlib.Path
+        Materialized file paths containing required artifacts (truth VCF, 
+        RTG SDF, and query VCF or FASTA).
+    output_dir : str or pathlib.Path
+        Directory where Veritas will write output files and metrics.
+    timeout_s : int
+        Maximum execution time allocated for the subprocess in seconds.
+    fail : ErrorFactory
+        Callable factory pre-bound with attempt metadata to construct 
+        standardized ``VeritasRunnerError`` exceptions.
+
+    Raises
+    ------
+    VeritasRunnerError
+        Raised when the Veritas binary is missing, times out, encounters 
+        scientific incompatibility (exit code 2), invalid input (exit code 3), 
+        or crashes unexpectedly.
     """
-    Phase 2. Supervises the veritas subprocess. Concerned only with what a
-    supervisor can observe from outside; veritas's own scientific errors are
-    surfaced through its exit code and the metrics it does or does not write.
-    """
+    assert "truth_vcf" in paths and "rtg_sdf" in paths, "Input error: Missing truth artifacts"
+    assert ("query_vcf" in paths) ^ ("query_fasta" in paths), "Input error: Ambiguous query input"
+    assert "query_fasta" not in paths or "reference_fasta" in paths, "Input error: FASTA missing reference"
+
+    paths = {k: str(v) for k,v in paths.items()}
+    output_dir = str(output_dir)
+
     cmd = ["veritas", "validate", "--output-dir", output_dir]
     if "query_vcf" in paths:
         cmd += ["--query-vcf", paths["query_vcf"]]
@@ -236,20 +271,34 @@ def _run_veritas(paths: dict, output_dir: str, timeout_s: int) -> None:
 
     try:
         subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s, check=True)
-    except subprocess.TimeoutExpired as e:
-        raise VeritasRunnerError(
-            failure_class=StatusClass.TIMEOUT,
-            message=f"Veritas validate exceeded {timeout_s}s and was terminated.",
-        ) from e
     except FileNotFoundError as e:
-        raise VeritasRunnerError(
-            failure_class=StatusClass.CONFIG_ERROR,
-            message="Veritas executable not found on PATH.",
+        raise fail(
+            StatusClass.EXECUTOR_UNAVAILABLE,
+            "Veritas binary missing on host PATH.",
         ) from e
+    
+    except subprocess.TimeoutExpired as e:
+        raise fail(
+            StatusClass.PROCESSING_TIMEOUT,
+            f"Veritas validate exceeded {timeout_s}s and was terminated.",
+        ) from e
+
     except subprocess.CalledProcessError as e:
-        raise VeritasRunnerError(
-            failure_class=StatusClass.VERITAS_CRASHED,
-            message=f"Veritas validate exited with code {e.returncode}.",
+        detail = e.stderr.strip().splitlines()[-1] if e.stderr else f"Exit code {e.returncode}"
+
+        if e.returncode == 2:
+            raise fail(
+                StatusClass.SCIENTIFIC_INCOMPATIBILITY,
+                f"Veritas rejected sample alignment or genome build: {detail}",
+            ) from e
+        if e.returncode == 3:
+            raise fail(
+                StatusClass.INVALID_INPUT,
+                f"Veritas reported invalid arguments or inputs: {detail}",
+            ) from e
+        raise fail(
+            StatusClass.INTERNAL_ERROR,
+            f"Veritas process crashed unexpectedly ({detail}).",
         ) from e
 
 
