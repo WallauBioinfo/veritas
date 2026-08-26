@@ -19,6 +19,7 @@ import time
 from typing import List, Optional
 from pathlib import Path
 import requests
+import shutil
 
 from veritas.veritas_runner.datamodels import ManifestFile
 from veritas_runner.datamodels import Manifest, SampleInput, SampleOutcome, AttemptResult
@@ -193,7 +194,6 @@ class ExecutionAttempt:
                 output_dir.mkdir(exist_ok=True, parents=True)
                 fail = ErrorFactory(attempt_id=self.attempt_id, sample_run_id=sample_run_id)
                 _run_veritas(paths, output_dir, per_sample_timeout_s, fail)
-                _check_metrics(output_dir)
             outcome = SampleOutcome(sample_run_id, StatusClass.SUCCESS)
         except VeritasRunnerError as e:
             outcome = SampleOutcome(sample_run_id, e.failure_class, str(e))
@@ -225,7 +225,7 @@ def _run_veritas(
         timeout_s: int,
         fail: ErrorFactory
     ) -> None:
-    """Supervise the Veritas  subprocess.
+    """Triggers and supervises the Veritas subprocess.
 
     Relies on upstream boundary validation for input correctness; maps 
     subprocess exit codes and system failures to domain-specific 
@@ -249,25 +249,24 @@ def _run_veritas(
     VeritasRunnerError
         Raised when the Veritas binary is missing, times out, encounters 
         scientific incompatibility (exit code 2), invalid input (exit code 3), 
-        or crashes unexpectedly.
+        crashes unexpectedly, or exits with code 0 without producing ``metrics.tsv``.
     """
     assert "truth_vcf" in paths and "rtg_sdf" in paths, "Input error: Missing truth artifacts"
     assert ("query_vcf" in paths) ^ ("query_fasta" in paths), "Input error: Ambiguous query input"
     assert "query_fasta" not in paths or "reference_fasta" in paths, "Input error: FASTA missing reference"
 
-    paths = {k: str(v) for k,v in paths.items()}
-    output_dir = str(output_dir)
+    str_paths = {k: str(v) for k,v in paths.items()}
 
-    cmd = ["veritas", "validate", "--output-dir", output_dir]
-    if "query_vcf" in paths:
-        cmd += ["--query-vcf", paths["query_vcf"]]
+    cmd = ["veritas", "validate", "--output-dir", str(output_dir)]
+    if "query_vcf" in str_paths:
+        cmd += ["--query-vcf", str_paths["query_vcf"]]
     if "query_fasta" in paths:
-        cmd += ["--query-fasta", paths["query_fasta"], "--reference", paths["reference_fasta"]]
-    cmd += ["--truth-vcf", paths["truth_vcf"], "--rtg-reference", paths["rtg_sdf"]]
+        cmd += ["--query-fasta", str_paths["query_fasta"], "--reference", str_paths["reference_fasta"]]
+    cmd += ["--truth-vcf", str_paths["truth_vcf"], "--rtg-reference", str_paths["rtg_sdf"]]
 
     for role, flag in _BED_CLI_FLAGS.items():
         if role in paths:
-            cmd += [flag, paths[role]]
+            cmd += [flag, str_paths[role]]
 
     try:
         subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s, check=True)
@@ -301,15 +300,11 @@ def _run_veritas(
             f"Veritas process crashed unexpectedly ({detail}).",
         ) from e
 
-
-def _check_metrics(output_dir: str) -> None:
-    """Phase 3, output half. Structural only - presence and shape, never quality."""
-    expected = ["metrics.tsv"]
-    missing = [f for f in expected if not os.path.exists(os.path.join(output_dir, f))]
-    if missing:
-        raise VeritasRunnerError(
-            failure_class=StatusClass.METRICS_MISSING,
-            message=f"Expected output(s) missing: {', '.join(missing)}",
+    metrics_file = output_dir / "metrics.tsv"
+    if not metrics_file.is_file() or metrics_file.stat().st_size == 0:
+        raise fail(
+            StatusClass.METRICS_MISSING,
+            "Veritas exited with status 0 but failed to generate non-empty metrics.tsv.",
         )
 
 
@@ -323,17 +318,20 @@ def _veritas_version() -> str:
         return "unknown"
 
 
-# --------------------------------------------------------------- the sample loop
+def _check_storage_capacity(target_dir: Path, min_gb: int = 50) -> None:
+    free_bytes = shutil.disk_usage(target_dir).free
+    if free_bytes < min_gb * (1024**3):
+        raise VeritasRunnerError(
+            StatusClass.SYSTEM_RESOURCE_EXHAUSTED,
+            f"Insufficient disk space in {target_dir}. Required: {min_gb} GB.",
+        )
 
 
 def run_attempt(
-    attempt_id: str,
-    workdir: str,
+    self,
+    fail: ErrorFactory,
     api_url: Optional[str] = None,
-    oidc_token: Optional[str] = None,
-    workflow_run_id: int = 0,
-    dry_run: bool = False,
-) -> AttemptResult:
+    oidc_token: Optional[str] = None,) -> AttemptResult:
     """
     Execute one ExecutionAttempt end to end and return its terminal state.
 
@@ -342,26 +340,15 @@ def run_attempt(
     reports once and exits. It never re-dispatches itself.
     """
     started = time.monotonic()
-    api_url = api_url or os.environ.get("PATHOEQA_API_URL", "")
-    oidc_token = oidc_token or os.environ.get("GITHUB_OIDC_TOKEN", "")
-
-    _validate_prerequisites(attempt_id, workdir, api_url, oidc_token)
-
-    session = requests.Session()
-    client = PathoEQAClient(api_url, oidc_token, attempt_id, session=session)
 
     try:
-        # --- Phase 1a: no manifest yet, so no callback channel exists. Failures
-        # here can only be signalled through the process exit code.
         manifest: Manifest = with_auto_retry(
-            client.fetch_manifest, description="manifest fetch"
+            self.client.fetch_manifest, description="manifest fetch"
         )
-
+        
         deadline = time.monotonic() + manifest.operational_deadline_seconds
-        reporter = AttemptReporter(client, attempt_id, workflow_run_id)
 
-        # --- Phase 1b onward: a manifest exists, so every outcome is reportable.
-        reporter.emit(
+        self.reporter.emit(
             "attempt_started",
             payload={"sample_count": len(manifest.samples)},
             deadline=deadline,
@@ -373,9 +360,9 @@ def run_attempt(
 
         for sample in sorted(manifest.samples, key=lambda s: s.sample_order):
             if time.monotonic() > deadline:
-                stopped_early = VeritasRunnerError(
-                    failure_class=StatusClass.DEADLINE_EXCEEDED,
-                    message=(
+                stopped_early = fail(
+                    StatusClass.DEADLINE_EXCEEDED,
+                    (
                         f"Operational deadline reached after {len(outcomes)}/"
                         f"{len(manifest.samples)} samples; remaining samples left pending."
                     ),
