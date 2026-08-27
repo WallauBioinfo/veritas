@@ -348,55 +348,48 @@ def run_attempt(
         
         deadline = time.monotonic() + manifest.operational_deadline_seconds
 
+        samples = manifest.samples
+
         self.reporter.emit(
             "attempt_started",
-            payload={"sample_count": len(manifest.samples)},
+            payload={"sample_count": len(samples)},
             deadline=deadline,
             best_effort=True,
         )
 
         outcomes: List[SampleOutcome] = []
-        stopped_early: Optional[VeritasRunnerError] = None
+        stopped_early: VeritasRunnerError | None
 
-        for sample in sorted(manifest.samples, key=lambda s: s.sample_order):
+        for sample in sorted(samples, key=lambda s: s.sample_order):
             if time.monotonic() > deadline:
                 stopped_early = fail(
                     StatusClass.DEADLINE_EXCEEDED,
                     (
                         f"Operational deadline reached after {len(outcomes)}/"
-                        f"{len(manifest.samples)} samples; remaining samples left pending."
-                    ),
-                    attempt_id=attempt_id,
-                )
+                        f"{len(samples)} samples; remaining samples left pending."
+                    )
+                ).bind(attempt_id=self.attempt_id)
+                
                 break
 
-            outcome = _process_sample(
+            outcome = self._process_sample(
                 sample,
-                workdir,
-                session,
-                attempt_id,
-                reporter,
-                deadline,
                 per_sample_timeout_s=max(1, int(deadline - time.monotonic())),
-                dry_run=dry_run,
             )
-            outcomes.append(outcome)
 
-            # An environment fault is not sample-specific - every remaining sample
-            # would hit it too. Stop and let PathoEQA decide, rather than burning
-            # the budget producing identical failures.
             if outcome.status in (StatusClass.CONFIG_ERROR, StatusClass.AUTH_REJECTED):
-                stopped_early = VeritasRunnerError(
+                stopped_early = fail(
                     failure_class=outcome.status,
                     message=f"Aborting attempt: {outcome.message}",
-                    attempt_id=attempt_id,
-                )
+                ).bind(attempt_id=self.attempt_id)
                 break
 
-        succeeded = [s for s in outcomes if s.success]
-        unprocessed = len(manifest.samples) - len(outcomes)
+            outcomes.append(outcome)
 
-        if succeeded and len(succeeded) == len(manifest.samples):
+        succeeded = [s for s in outcomes if s.success]
+        unprocessed = len(samples) - len(outcomes)
+
+        if succeeded and len(succeeded) == len(samples):
             terminal_state, status, event = "Completed", StatusClass.SUCCESS, "attempt_completed"
         elif succeeded:
             terminal_state, event = "Partial", "attempt_partial"
@@ -412,9 +405,7 @@ def run_attempt(
         duration_ms = int((time.monotonic() - started) * 1000)
         veritas_ver = _veritas_version()
 
-        # Terminal callback is NOT best-effort. If PathoEQA never learns the
-        # outcome the attempt goes `Stale`, which is worse than a loud failure.
-        reporter.emit(
+        self.reporter.emit(
             event,
             payload={
                 "terminal_state": terminal_state,
@@ -428,7 +419,7 @@ def run_attempt(
         )
 
         return AttemptResult(
-            attempt_id=attempt_id,
+            attempt_id=self.attempt_id,
             terminal_state=terminal_state,
             status=status,
             duration_ms=duration_ms,
@@ -436,4 +427,4 @@ def run_attempt(
             samples=outcomes,
         )
     finally:
-        client.close()
+        self.client.close()

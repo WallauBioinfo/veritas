@@ -1,25 +1,13 @@
 # veritas_runner/retry.py
 #
-# Request-level automatic retry, isolated in one file so it can be switched off
-# or deleted without touching orchestration logic.
+# Atomic, request-level retry for CONTROL-PLANE calls only
+# (manifest GET, callback POST). Same attempt_id, no workflow_dispatch.
 #
-# SCOPE (the specs are ambiguous, so this module states the contract):
-#   * IN SCOPE  - re-issuing ONE HTTP request inside the CURRENT ExecutionAttempt
-#                 after a classified-transient infrastructure failure
-#                 (connection reset, read timeout, 502/503/504, 429).
-#                 Same attempt_id, no new DB row, no workflow_dispatch.
-#   * OUT OF SCOPE - attempt-level retry and continuation. A new "tentativa"
-#                 means a new attempt_id and a new workflow_dispatch, decided by
-#                 PathoEQA after this runner reports a terminal state. The
-#                 runner never simulates, mocks or triggers that.
+# Data-plane downloads do NOT use this helper. Restarting a multi-GB stream
+# from byte zero is the failure mode this module exists to avoid. Resume
+# lives in artefacts.ArtefactClass.download.
 #
-# HOW TO REMOVE IT
-#   Option A (runtime, no code change): set VERITAS_AUTO_RETRY=0 (or
-#     VERITAS_MAX_AUTO_RETRIES=0). with_auto_retry degrades to a plain call:
-#     the operation runs once and any failure propagates unchanged.
-#   Option B (permanent): delete this file and replace the import in runner.py
-#     with `def with_auto_retry(op, **_): return op()`. No other call site or
-#     signature changes.
+# Disable: VERITAS_AUTO_RETRY=0 (or VERITAS_MAX_AUTO_RETRIES=0).
 
 from __future__ import annotations
 
@@ -28,28 +16,39 @@ import os
 import time
 from typing import Callable, Optional, TypeVar
 
-from veritas_runner.status import StatusClass
 from veritas_runner.exceptions import VeritasRunnerError
+from veritas_runner.status import StatusClass
+from veritas_runner.datamodels import RetryProfile
 
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
 
-# Feature flag. Off -> every operation runs exactly once.
 AUTO_RETRY_ENABLED = os.environ.get("VERITAS_AUTO_RETRY", "1").lower() not in (
     "0",
     "false",
     "no",
 )
 MAX_AUTO_RETRIES = int(os.environ.get("VERITAS_MAX_AUTO_RETRIES", 2))
-RETRY_BASE_DELAY_S = float(os.environ.get("VERITAS_RETRY_BASE_DELAY", 2))
+
+
+class Profiles:
+    """Named policies. Do not add a DATA_TRANSFER profile here.
+
+    Heavy artefact IO retries inside ArtefactClass so a drop can resume
+    with Range rather than repeating the whole GET.
+    """
+
+    FAST_CALLBACK = RetryProfile(initial_backoff_s=0.1, max_backoff_s=1.0)
+    CONTROL_PLANE = RetryProfile(initial_backoff_s=0.5, max_backoff_s=5.0)
 
 
 def retry_budget(max_retries: Optional[int] = None) -> int:
-    """Effective number of EXTRA attempts, after applying the feature flag."""
     if not AUTO_RETRY_ENABLED:
         return 0
     return MAX_AUTO_RETRIES if max_retries is None else max_retries
+
+
 
 
 def with_auto_retry(
@@ -58,18 +57,16 @@ def with_auto_retry(
     description: str,
     deadline: Optional[float] = None,
     max_retries: Optional[int] = None,
+    profile: RetryProfile = Profiles.CONTROL_PLANE,
 ) -> T:
     """
-    Run `operation`, retrying only classified-transient failures, at most
-    `retry_budget()` extra times (spec default: 2), with exponential backoff.
+    Re-issue an atomic callable after classified-transient failures.
 
-    Never retried: 4xx, schema violations, checksum mismatches, scientific
-    incompatibility, config errors. Those are deterministic - a second identical
-    request returns the same answer and only burns the 75-minute budget.
+    Never retried: 4xx, schema/checksum errors, scientific incompatibility,
+    config errors. Those are deterministic.
 
-    The deadline is honoured before each try and before each sleep, so retrying
-    can never push the attempt past the operational deadline; it raises
-    DEADLINE_EXCEEDED instead, which the caller turns into `Partial`.
+    Deadline is checked before each try and before each sleep. Exhausting
+    the budget raises DEADLINE_EXCEEDED rather than sleeping past it.
     """
     budget = retry_budget(max_retries)
     last_error: Optional[VeritasRunnerError] = None
@@ -86,7 +83,7 @@ def with_auto_retry(
             last_error = e
             if not e.failure_class.transient or attempt_no == budget:
                 raise
-            delay = RETRY_BASE_DELAY_S * (2**attempt_no)
+            delay = _sleep_delay(profile, attempt_no)
             if deadline is not None and time.monotonic() + delay > deadline:
                 raise VeritasRunnerError(
                     failure_class=StatusClass.DEADLINE_EXCEEDED,
