@@ -4,7 +4,7 @@ import os
 from typing import Optional
 from datetime import datetime, timezone
 
-from pathoeqa import PathoEQAClient
+from veritas_runner.pathoeqa import PathoEQAClient
 from veritas_runner.datamodels import CallbackEnvelope
 from veritas_runner.exceptions import VeritasRunnerError
 from veritas_runner.retry import with_auto_retry
@@ -75,7 +75,7 @@ class AttemptReporter:
         """
 
         envelope = CallbackEnvelope(
-            schema_version=self.CALLBACK_SCHEMA_VERSION,
+            schema_version=self.schema_version,
             event_id=str(uuid.uuid4()),
             attempt_id=self.attempt_id,
             workflow_run_id=self.workflow_run_id,

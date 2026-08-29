@@ -2,7 +2,6 @@ from typing import List, Optional, Self, Literal, Dict
 from pydantic import BaseModel, Field, model_validator, field_validator, PositiveFloat
 from dataclasses import dataclass, field
 from status import StatusClass
-import random
 
 class ManifestFile(BaseModel):
     role: str
@@ -187,19 +186,3 @@ class AttemptResult:
     @property
     def exit_code(self) -> int:
         return self.status.exit_code
-
-
-class RetryProfile(BaseModel):
-    initial_backoff_s: PositiveFloat
-    max_backoff_s: PositiveFloat
-    backoff_factor: float = Field(default=2.0, ge=1.0)
-    jitter: bool = True
-
-    def sleep_delay(self, attempt_no: int = 0) -> float:
-        delay = min(
-            self.initial_backoff_s * (self.backoff_factor ** attempt_no),
-            self.max_backoff_s,
-        )
-        if self.jitter:
-            delay *= 0.5 + random.random()
-        return delay
