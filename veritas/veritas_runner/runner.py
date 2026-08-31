@@ -12,21 +12,24 @@ from __future__ import annotations
 
 import logging
 import os
-from re import S
 import subprocess
-from sys import path
 import time
-from typing import List, Optional
+import shutil
+from typing import Any, List, Optional
 from pathlib import Path
 import requests
-import shutil
 
-from veritas.veritas_runner.datamodels import ManifestFile
-from veritas_runner.datamodels import Manifest, SampleInput, SampleOutcome, AttemptResult
+from veritas_runner.datamodels import (
+    Manifest,
+    ManifestFile,
+    SampleInput,
+    SampleOutcome,
+    AttemptResult,
+)
 from veritas_runner.exceptions import ErrorFactory, VeritasRunnerError
 from veritas_runner.helpers import _validate_prerequisites
 from veritas_runner.pathoeqa import PathoEQAClient
-from veritas_runner.retry import with_auto_retry
+from veritas_runner.retry import CONTROL_PLANE, DATA_PLANE
 from veritas_runner.status import StatusClass
 from veritas_runner.artefacts import ArtefactClass
 from veritas_runner.reporter import AttemptReporter
@@ -125,7 +128,7 @@ class ExecutionAttempt:
             filename = artefact.url.split("?")[0].rsplit("/", 1)[-1]
             dest = sample_dir / f"{artefact.role}_{filename}"
 
-            fetched = with_auto_retry(
+            fetched = DATA_PLANE.run(
                 lambda : artefact_handler.download(artefact, dest, deadline=self.deadline),
                 description=f"download {artefact.role}",
                 deadline=self.deadline,
@@ -135,8 +138,7 @@ class ExecutionAttempt:
         if "rtg_sdf" in paths:
             paths["rtg_sdf"] = artefact_handler.prepare_rtg_sdf(
                 paths["rtg_sdf"],
-                sample_dir / "rtg_sdf",
-                attempt_id=self.attempt_id,
+                sample_dir / "rtg_sdf"
             )
 
         if "truth_tbi" in paths:
@@ -217,6 +219,136 @@ class ExecutionAttempt:
             best_effort=True,
         )
         return outcome
+
+    def run_attempt(
+        self,
+        fail: ErrorFactory
+   ) -> AttemptResult:
+        """
+        Execute one execution attempt end-to-end and return its terminal state.
+
+        Orchestrates sample processing for the execution attempt while enforcing
+        operational deadlines, pre-flight storage capacity validation, and lifecycle
+        callback reporting. Terminal states follow SPEC-05 guidelines: "Completed"
+        (all samples succeeded), "Partial" (some samples succeeded before stopping),
+        or "Failed" (no usable sample processing). Once determined, terminal states
+        are emitted once and treated as immutable.
+
+        Parameters
+        ----------
+        fail : ErrorFactory
+            Contextual exception factory bound to the active execution attempt.
+
+        Returns
+        -------
+        AttemptResult
+            Data model capturing terminal state classification, overall execution status,
+            duration in milliseconds, runner software version, and list of per-sample
+            outcomes.
+        """
+        started = time.monotonic()
+
+        try:
+            manifest: Manifest = CONTROL_PLANE.run(
+                self.client.fetch_manifest, description="manifest fetch"
+            )
+            
+            self.deadline = time.monotonic() + manifest.operational_deadline_seconds
+
+            samples = manifest.samples
+
+            self.reporter.emit(
+                "attempt_started",
+                payload={"sample_count": len(samples)},
+                deadline=self.deadline,
+                best_effort=True,
+            )
+
+            outcomes: List[SampleOutcome] = []
+            stopped_early: Optional[VeritasRunnerError] = None
+
+            for sample in sorted(samples, key=lambda s: s.sample_order):
+                if time.monotonic() > self.deadline:
+                    stopped_early = fail(
+                        StatusClass.DEADLINE_EXCEEDED,
+                        (
+                            f"Operational deadline reached after {len(outcomes)}/"
+                            f"{len(samples)} samples; remaining samples left pending."
+                        )
+                    ).bind(attempt_id=self.attempt_id)
+                    
+                    break
+
+                capacity = _check_storage_capacity(self.workdir, sample.total_size)
+                if not capacity["passed"]:
+                    stopped_early = fail(
+                        StatusClass.SYSTEM_RESOURCE_EXHAUSTED,
+                        (
+                            f"Insufficient disk space in '{self.workdir}'. "
+                            f"Available: {capacity['free_GiB']:.2f} GiB, "
+                            f"Required: {capacity['est_needed_GiB']:.2f} GiB."
+                        ),
+                    ).bind(attempt_id=self.attempt_id)
+                    
+                    break
+
+                outcome = self._process_sample(
+                    sample,
+                    per_sample_timeout_s=max(1, int(self.deadline - time.monotonic())),
+                )
+
+                if outcome.status in (StatusClass.CONFIG_ERROR, StatusClass.AUTH_REJECTED):
+                    stopped_early = fail(
+                        failure_class=outcome.status,
+                        message=f"Aborting attempt: {outcome.message}",
+                    ).bind(attempt_id=self.attempt_id)
+                    break
+
+                outcomes.append(outcome)
+
+            succeeded = [s for s in outcomes if s.success]
+            unprocessed = len(samples) - len(outcomes)
+
+            if succeeded and len(succeeded) == len(samples):
+                terminal_state, status, event = "Completed", StatusClass.SUCCESS, "attempt_completed"
+            elif succeeded:
+                terminal_state, event = "Partial", "attempt_partial"
+                status = stopped_early.failure_class if stopped_early else StatusClass.SUCCESS
+            else:
+                terminal_state, event = "Failed", "attempt_failed"
+                status = (
+                    stopped_early.failure_class
+                    if stopped_early
+                    else (outcomes[0].status if outcomes else StatusClass.INTERNAL_ERROR)
+                )
+
+            duration_ms = int((time.monotonic() - started) * 1000)
+            veritas_ver = _veritas_version()
+
+            self.reporter.emit(
+                event,
+                payload={
+                    "terminal_state": terminal_state,
+                    "duration_ms": duration_ms,
+                    "veritas_version": veritas_ver,
+                    "samples_total": len(manifest.samples),
+                    "samples_succeeded": len(succeeded),
+                    "samples_unprocessed": unprocessed,
+                    "failure_class": None if status is StatusClass.SUCCESS else status.value,
+                },
+            )
+
+            return AttemptResult(
+                attempt_id=self.attempt_id,
+                terminal_state=terminal_state,
+                status=status,
+                duration_ms=duration_ms,
+                veritas_version=veritas_ver,
+                samples=outcomes,
+            )
+        finally:
+            self.client.close()
+
 
 
 def _run_veritas(
@@ -318,113 +450,84 @@ def _veritas_version() -> str:
         return "unknown"
 
 
-def _check_storage_capacity(target_dir: Path, min_gb: int = 50) -> None:
-    free_bytes = shutil.disk_usage(target_dir).free
-    if free_bytes < min_gb * (1024**3):
-        raise VeritasRunnerError(
-            StatusClass.SYSTEM_RESOURCE_EXHAUSTED,
-            f"Insufficient disk space in {target_dir}. Required: {min_gb} GB.",
-        )
-
-
-def run_attempt(
-    self,
-    fail: ErrorFactory,
-    api_url: Optional[str] = None,
-    oidc_token: Optional[str] = None,) -> AttemptResult:
+def _check_storage_capacity(
+    target_dir: Path,
+    size_summary: dict[str, Any],
+    *,
+    safety_multiplier: float = 2.5,
+    fallback_min_gb: float = 50.0,
+) -> dict[str, float | bool]:
     """
-    Execute one ExecutionAttempt end to end and return its terminal state.
+    Verify that the target filesystem has sufficient free disk space.
 
-    Terminal states, per SPEC-05: Completed (all samples success), Partial (some success,
-    then a stop), Failed (nothing usable). Terminal is immutable - the runner
-    reports once and exits. It never re-dispatches itself.
+    Evaluates available disk space against estimated required space calculated
+    from sample manifest size metadata, applying a safety headroom multiplier
+    for intermediate extraction and output files. Logs a warning if manifest
+    metadata contains unspecified file sizes (None).
+
+    Parameters
+    ----------
+    target_dir : Path
+        Target working directory where downloaded artifacts, extracted archives,
+        and operational outputs will be stored.
+    size_summary : dict of str to Any
+        Summary dictionary (typically from ``SampleInput.total_size``) containing
+        keys ``total_files``, ``missing_count``, and ``known_bytes``.
+    safety_multiplier : float, default=2.5
+        Headroom factor applied to ``known_bytes`` to account for temporary
+        ``.part`` files, archive decompression (e.g., RTG SDF), and output files.
+    fallback_min_gb : float, default=50.0
+        Minimum floor limit in GiB enforced if ``known_bytes`` is zero or if
+        one or more artifact sizes are missing (None).
+
+    Returns
+    -------
+    dict of str to (float or bool)
+        Capacity evaluation result containing:
+
+        * ``"est_needed_GiB"`` : float
+            Estimated disk space required in GiB.
+        * ``"free_GiB"`` : float
+            Available free space on the target filesystem in GiB.
+        * ``"passed"`` : bool
+            True if available space meets or exceeds estimated requirements.
     """
-    started = time.monotonic()
+    total_files = size_summary["total_files"]
+    missing_count = size_summary["missing_count"]
+    known_bytes = size_summary["known_bytes"]
 
-    try:
-        manifest: Manifest = with_auto_retry(
-            self.client.fetch_manifest, description="manifest fetch"
-        )
-        
-        deadline = time.monotonic() + manifest.operational_deadline_seconds
-
-        samples = manifest.samples
-
-        self.reporter.emit(
-            "attempt_started",
-            payload={"sample_count": len(samples)},
-            deadline=deadline,
-            best_effort=True,
+    if missing_count > 0:
+        logger.warning(
+            "Manifest metadata incomplete: %d of %d artifact(s) have unspecified sizes (None). "
+            "Capacity estimation may underestimate disk requirements; enforcing fallback minimum of %.1f GiB.",
+            missing_count,
+            total_files,
+            fallback_min_gb,
         )
 
-        outcomes: List[SampleOutcome] = []
-        stopped_early: VeritasRunnerError | None
+    if known_bytes > 0:
+        needed_bytes = int(known_bytes * safety_multiplier)
+        needed_bytes = max(needed_bytes, int(fallback_min_gb * (1024**3)))
+    else:
+        needed_bytes = int(fallback_min_gb * (1024**3))
 
-        for sample in sorted(samples, key=lambda s: s.sample_order):
-            if time.monotonic() > deadline:
-                stopped_early = fail(
-                    StatusClass.DEADLINE_EXCEEDED,
-                    (
-                        f"Operational deadline reached after {len(outcomes)}/"
-                        f"{len(samples)} samples; remaining samples left pending."
-                    )
-                ).bind(attempt_id=self.attempt_id)
-                
-                break
+    check_dir = target_dir
+    while not check_dir.exists() and check_dir.parent != check_dir:
+        check_dir = check_dir.parent
 
-            outcome = self._process_sample(
-                sample,
-                per_sample_timeout_s=max(1, int(deadline - time.monotonic())),
-            )
+    free_bytes = shutil.disk_usage(check_dir).free
+    passed = free_bytes >= needed_bytes
 
-            if outcome.status in (StatusClass.CONFIG_ERROR, StatusClass.AUTH_REJECTED):
-                stopped_early = fail(
-                    failure_class=outcome.status,
-                    message=f"Aborting attempt: {outcome.message}",
-                ).bind(attempt_id=self.attempt_id)
-                break
-
-            outcomes.append(outcome)
-
-        succeeded = [s for s in outcomes if s.success]
-        unprocessed = len(samples) - len(outcomes)
-
-        if succeeded and len(succeeded) == len(samples):
-            terminal_state, status, event = "Completed", StatusClass.SUCCESS, "attempt_completed"
-        elif succeeded:
-            terminal_state, event = "Partial", "attempt_partial"
-            status = stopped_early.failure_class if stopped_early else StatusClass.SUCCESS
-        else:
-            terminal_state, event = "Failed", "attempt_failed"
-            status = (
-                stopped_early.failure_class
-                if stopped_early
-                else (outcomes[0].status if outcomes else StatusClass.INTERNAL_ERROR)
-            )
-
-        duration_ms = int((time.monotonic() - started) * 1000)
-        veritas_ver = _veritas_version()
-
-        self.reporter.emit(
-            event,
-            payload={
-                "terminal_state": terminal_state,
-                "duration_ms": duration_ms,
-                "veritas_version": veritas_ver,
-                "samples_total": len(manifest.samples),
-                "samples_succeeded": len(succeeded),
-                "samples_unprocessed": unprocessed,
-                "failure_class": None if status is StatusClass.SUCCESS else status.value,
-            },
+    if passed:
+        logger.info(
+            "Storage check passed for '%s': %.2f GiB free (required estimate: %.2f GiB)",
+            target_dir,
+            free_bytes / (1024**3),
+            needed_bytes / (1024**3),
         )
 
-        return AttemptResult(
-            attempt_id=self.attempt_id,
-            terminal_state=terminal_state,
-            status=status,
-            duration_ms=duration_ms,
-            veritas_version=veritas_ver,
-            samples=outcomes,
-        )
-    finally:
-        self.client.close()
+    return {
+        "est_needed_GiB": needed_bytes / (1024**3),
+        "free_GiB": free_bytes / (1024**3),
+        "passed": passed,
+    }

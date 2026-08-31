@@ -1,5 +1,5 @@
 from typing import List, Optional, Self, Literal, Dict
-from pydantic import BaseModel, Field, model_validator, field_validator, PositiveFloat
+from pydantic import BaseModel, Field, model_validator, field_validator
 from dataclasses import dataclass, field
 from status import StatusClass
 
@@ -100,6 +100,13 @@ class SampleInput(BaseModel):
             raise ValueError("query_type 'fasta' requires 'reference_fasta' in truth_bundle.files")
         return self
 
+    @property
+    def total_size(self) -> dict[str, int | None]:
+        t_size = [self.query_input.size, *[f.size for f in self.truth_bundle.files]]
+        return {
+            "total_files":len(t_size),
+            "missing_size_count": t_size.count(None),
+            "known_size": sum(s for s in t_size if s is not None)}
     
 class Manifest(BaseModel):
     schema_version: str
