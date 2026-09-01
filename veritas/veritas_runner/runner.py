@@ -242,13 +242,26 @@ class ExecutionAttempt:
 
         outcome.duration_ms = int((time.monotonic() - started) * 1000)
 
+        disk_used_mb = self._get_dir_size_mb(output_dir.parent)
+
+        payload: dict[str, Any] = {
+            "duration_ms": outcome.duration_ms,
+            "resource_usage": {
+                "materialize_duration_ms": materialize_duration_ms,
+                "veritas_duration_ms": veritas_duration_ms,
+                "peak_memory_mb": peak_memory_mb,
+                "disk_used_mb": disk_used_mb,
+            },
+        }
+
+        if not outcome.success:
+            payload["failure_class"] = outcome.status.value
+            payload["detail"] = outcome.message[:2000]
+
         self.reporter.emit(
             "sample_completed" if outcome.success else "sample_failed",
             sample_run_id=sample_run_id,
-            payload={
-                "duration_ms": outcome.duration_ms,
-                **({} if outcome.success else {"failure_class": outcome.status.value, "detail": outcome.message[:2000]}),
-            },
+            payload=payload,
             deadline=self.deadline,
             best_effort=True,
         )
