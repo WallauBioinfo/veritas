@@ -12,39 +12,33 @@ class StatusClass(str, Enum):
 
     SUCCESS = "success"
 
-    ## TODO: Fix all this. Class values do not align with SPEC.
-
-    # Phase 1 - preflight: resolving attempt_id, auth, manifest, downloading inputs.
-    # Caller/attempt-data problem - PathoEQA must fix the request; no retry helps.
     INVALID_INPUT = "invalid_input"
-    ATTEMPT_NOT_FOUND = "attempt_not_found"
-    AUTH_REJECTED = "auth_rejected"
-    MANIFEST_INVALID = "manifest_invalid"
-    SCIENTIFIC_INCOMPATIBILITY = "scientific_incompatibility"
+    ATTEMPT_NOT_FOUND = "attempt_not_found" # NEW
+    AUTH_REJECTED = "auth_rejected" # NEW
+    MANIFEST_INVALID = "manifest_invalid" # NEW
+    SCIENTIFIC_INCOMPATIBILITY = "scientific_incompatibility" # CURRENTLY POORLY MAPPED
 
-    # Phase 1 - transient infrastructure. Eligible for in-process retry.
-    UPSTREAM_UNAVAILABLE = "upstream_unavailable"
+    # Transient infrastructure. Eligible for in-process retry.
+    UPSTREAM_UNAVAILABLE = "upstream_unavailable" # NEW
     DOWNLOAD_FAILED = "download_failed"
+    CALLBACK_FAILED = "callback_failed" # NEW
 
-    # Integrity - the bytes arrived but are wrong or unusable. Never retried:
-    # the frozen input or the recorded hash is wrong, and both need a human.
+
     CHECKSUM_MISMATCH = "checksum_mismatch"
-    ARTEFACT_INVALID = "artefact_invalid"  # correct bytes, unusable shape (bad tar, empty SDF)
+    ARTEFACT_INVALID = "artefact_invalid" # NEW
 
-    # Our own environment is broken - needs a maintainer, not a re-dispatch.
-    CONFIG_ERROR = "config_error"
+    CONFIG_ERROR = "config_error" # NEW
+    EXECUTOR_UNAVAILABLE = "executor_unavailable"
 
-    # Phase 2 - execution supervision (wrapping the veritas subprocess).
     TIMEOUT = "processing_timeout"
-    DEADLINE_EXCEEDED = "deadline_exceeded"
-    VERITAS_CRASHED = "veritas_crashed"
+    DEADLINE_EXCEEDED = "deadline_exceeded" # NEW
+    VERITAS_CRASHED = "veritas_crashed" # NEW
+    SYSTEM_RESOURCE_EXHAUSTED = "system_resource_exhausted"  # NEW: OOM-killed subprocess; see retry.py VERITAS_ENGINE
 
-    # Phase 3 - delivery. Format only, never a judgment on the analysis itself.
-    OUTPUT_INVALID = "output_invalid"  # veritas exited 0 but wrote unreadable/absent results
     METRICS_MISSING = "metrics_missing"
     CALLBACK_INVALID = "callback_invalid"
-    CALLBACK_FAILED = "callback_failed"
 
+    # Other
     INTERNAL_ERROR = "internal_error"
 
     @property
@@ -53,6 +47,12 @@ class StatusClass(str, Enum):
         True when re-issuing the *same request* may succeed without any state
         change upstream. Drives the in-process retry helper (max 2 extra tries).
         Says nothing about whether the ExecutionAttempt should be re-dispatched.
+
+        SYSTEM_RESOURCE_EXHAUSTED is deliberately excluded: blindly re-issuing
+        the same call won't fix an OOM. It's retried only under a profile that
+        explicitly opts it in (RetryProfile.allowed_status_classes), since a
+        useful retry there means changing something (e.g. memory allocation),
+        not repeating the identical operation.
         """
         return self in {
             StatusClass.UPSTREAM_UNAVAILABLE,
@@ -78,23 +78,69 @@ class StatusClass(str, Enum):
         }:
             return 10  # caller/attempt-data problem
         if self is StatusClass.CONFIG_ERROR:
-            return 20  # our environment - alert, do not re-dispatch
+            return 20 
         if self in {
             StatusClass.UPSTREAM_UNAVAILABLE,
-            StatusClass.DOWNLOAD_FAILED,
+            StatusClass.DOWNLOAD_FAILED
         }:
-            return 30  # transient, already retried in-process and still failing
+            return 30 
         if self in {StatusClass.CHECKSUM_MISMATCH, StatusClass.ARTEFACT_INVALID}:
-            return 35  # integrity - frozen input or recorded hash is wrong
+            return 35
         if self in {StatusClass.TIMEOUT, StatusClass.DEADLINE_EXCEEDED}:
-            return 38  # ran out of budget - continuation, not retry
-        if self is StatusClass.VERITAS_CRASHED:
-            return 40  # died mid-run, cause unknown - investigate
+            return 38
+        if self is StatusClass.SYSTEM_RESOURCE_EXHAUSTED:
+            return 39
+        if self in {StatusClass.VERITAS_CRASHED, StatusClass.EXECUTOR_UNAVAILABLE}:
+            return 40
         if self in {
             StatusClass.OUTPUT_INVALID,
             StatusClass.METRICS_MISSING,
             StatusClass.CALLBACK_INVALID,
             StatusClass.CALLBACK_FAILED,
         }:
-            return 50  # completed, delivery problem - results may exist on disk
-        return 60  # INTERNAL_ERROR and anything unclassified
+            return 50  # Completed, but delivery problem: esults may exist on disk
+        return 60  # INTERNAL_ERROR and anything unmapped
+
+    @property
+    def spec_failure_class(self) -> str:
+        """
+        This class's failure_class as sent to PathoEQA, restricted to the
+        nine categories SPEC-05/GUIA-14 document. Several internal classes
+        map to a shared spec category by judgment call, noted inline; the
+        detail these classes distinguish (e.g. ATTEMPT_NOT_FOUND vs
+        AUTH_REJECTED) still lives in the callback's sanitized `detail` text,
+        it's just not encoded in `failure_class` itself.
+        """
+        # TODO: check mapping if reasonable
+
+        if self in {
+            StatusClass.SUCCESS,
+            StatusClass.INVALID_INPUT,
+            StatusClass.SCIENTIFIC_INCOMPATIBILITY,
+            StatusClass.UPSTREAM_UNAVAILABLE,  # -> mapped below to executor_unavailable
+            StatusClass.DOWNLOAD_FAILED,
+            StatusClass.CHECKSUM_MISMATCH,
+            StatusClass.TIMEOUT,
+            StatusClass.METRICS_MISSING,
+            StatusClass.CALLBACK_INVALID,
+            StatusClass.INTERNAL_ERROR,
+            StatusClass.EXECUTOR_UNAVAILABLE,
+        }:
+            if self is StatusClass.UPSTREAM_UNAVAILABLE:
+                return "executor_unavailable"
+            return self.value
+
+        if self in {
+            StatusClass.ATTEMPT_NOT_FOUND,
+            StatusClass.AUTH_REJECTED,
+            StatusClass.MANIFEST_INVALID,
+            StatusClass.ARTEFACT_INVALID,
+        }:
+            return "invalid_input"
+
+        if self is StatusClass.DEADLINE_EXCEEDED:
+            return "processing_timeout"
+
+        if self is StatusClass.CALLBACK_FAILED:
+            return "callback_invalid"
+        return "internal_error"

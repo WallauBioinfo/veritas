@@ -216,19 +216,35 @@ class PathoEQAClient:
                 },
                 timeout=(CONNECT_TIMEOUT_S, READ_TIMEOUT_S),
             )
-        except requests.exceptions.RequestException as e:
+        except (
+            requests.exceptions.SSLError,
+            requests.exceptions.InvalidURL,
+            requests.exceptions.MissingSchema,
+            requests.exceptions.InvalidHeader,
+        ) as e:
+            raise self._error(
+                StatusClass.CALLBACK_INVALID,
+                f"Invalid callback configuration or SSL failure: {type(e).__name__} - {e}",
+            ) from e
+        except (
+            requests.exceptions.Timeout,
+            requests.exceptions.ConnectionError,
+            requests.exceptions.ChunkedEncodingError,
+        ) as e:
             raise self._error(
                 StatusClass.CALLBACK_FAILED,
-                f"Callback transport failure: {type(e).__name__}",
+                f"Callback network transport failure: {type(e).__name__}",
             ) from e
-
+        except requests.exceptions.RequestException as e:
+            raise self._error(
+                StatusClass.CALLBACK_INVALID,
+                f"Callback request failed: {type(e).__name__} - {e}",
+            ) from e
         self._error.raise_for_http(
             response.status_code,
             HttpSurface.CALLBACK,
             context="status callback"
         )
-
-    # ----------------------------------------------------------------- connectors
 
     def close(self) -> None:
         """Closes the underlying requests HTTP session."""

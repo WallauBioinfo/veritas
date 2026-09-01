@@ -464,6 +464,7 @@ def _run_veritas(
     except subprocess.CalledProcessError as e:
         detail = e.stderr.strip().splitlines()[-1] if e.stderr else f"Exit code {e.returncode}"
 
+        # TODO: error mapping below is invalid. Build custom Click exception classes in Veritas.
         if e.returncode == 2:
             raise fail(
                 StatusClass.SCIENTIFIC_INCOMPATIBILITY,
@@ -475,7 +476,7 @@ def _run_veritas(
                 f"Veritas reported invalid arguments or inputs: {detail}",
             ) from e
         raise fail(
-            StatusClass.INTERNAL_ERROR,
+            StatusClass.VERITAS_CRASHED,
             f"Veritas process crashed unexpectedly ({detail}).",
         ) from e
 
