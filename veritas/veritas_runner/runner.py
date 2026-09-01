@@ -12,11 +12,12 @@ from __future__ import annotations
 
 import logging
 import os
+import resource
+import shutil
 import subprocess
 import time
-import shutil
-from typing import Any, List, Optional
 from pathlib import Path
+from typing import Any, List, Optional
 import requests
 
 from veritas_runner.datamodels import (
@@ -29,7 +30,7 @@ from veritas_runner.datamodels import (
 from veritas_runner.exceptions import ErrorFactory, VeritasRunnerError
 from veritas_runner.helpers import _validate_prerequisites
 from veritas_runner.pathoeqa import PathoEQAClient
-from veritas_runner.retry import CONTROL_PLANE, DATA_PLANE
+from veritas_runner.retry import CONTROL_PLANE, DATA_PLANE, VERITAS_ENGINE
 from veritas_runner.status import StatusClass
 from veritas_runner.artefacts import ArtefactClass
 from veritas_runner.reporter import AttemptReporter
@@ -146,6 +147,26 @@ class ExecutionAttempt:
 
         return paths
 
+    def _get_dir_size_mb(self, path: Path) -> float:
+        """
+        Calculate the total disk space consumed by a directory in megabytes.
+
+        Parameters
+        ----------
+        path : Path
+            Target directory path to inspect.
+
+        Returns
+        -------
+        float
+            Total accumulated file size in MiB rounded to two decimal places, or
+            0.0 if the directory does not exist.
+        """
+        if not path.exists():
+            return 0.0
+        total_bytes = sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
+        return round(total_bytes / (1024 ** 2), 2)
+
 
     def _process_sample(
         self,
@@ -195,7 +216,20 @@ class ExecutionAttempt:
             if not self.dry_run:
                 output_dir.mkdir(exist_ok=True, parents=True)
                 fail = ErrorFactory(attempt_id=self.attempt_id, sample_run_id=sample_run_id)
-                _run_veritas(paths, output_dir, per_sample_timeout_s, fail)
+
+                mem_before = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
+                veritas_started = time.monotonic()
+
+                VERITAS_ENGINE.run(
+                    lambda: _run_veritas(paths, output_dir, per_sample_timeout_s, fail),
+                    description=f"veritas validate {sample_run_id}",
+                    deadline=self.deadline,
+                )
+
+                veritas_duration_ms = int((time.monotonic() - veritas_started) * 1000)
+                mem_after = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
+                peak_memory_mb = round(max(mem_before, mem_after) / 1024, 2)
+
             outcome = SampleOutcome(sample_run_id, StatusClass.SUCCESS)
         except VeritasRunnerError as e:
             outcome = SampleOutcome(sample_run_id, e.failure_class, str(e))
