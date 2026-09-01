@@ -117,7 +117,7 @@ class VeritasRunnerError(Exception):
             detail, and optional duration in seconds.
         """
         return CallbackPayload(
-            failure_class=self.failure_class.value,
+            failure_class=self.failure_class.spec_failure_class,
             detail=self.message[:self.max_detail_chars],
             duration_seconds=round(duration_s, 3) if duration_s is not None else None,
         )
