@@ -113,7 +113,7 @@ class VeritasRunnerError(Exception):
         Returns
         -------
         CallbackPayload
-            Validated inner payload containing the string failure class, truncated
+            Validated inner payload containing the mapped string failure class, truncated
             detail, and optional duration in seconds.
         """
         return CallbackPayload(

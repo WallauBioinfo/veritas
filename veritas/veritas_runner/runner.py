@@ -100,7 +100,7 @@ class ExecutionAttempt:
         Returns
         -------
         dict[str, Path]
-            Mapping of artefact roles (e.g., `'truth_vcf'`, `'query_input'`,
+            Mapping of artefact roles (e.g., `'truth_vcf'`, `'query_fasta'`,
             `'rtg_sdf'`) to their resolved local `Path` locations on disk.
 
         Raises
@@ -199,6 +199,10 @@ class ExecutionAttempt:
         sample_run_id = sample.sample_run_id
         output_dir = self.workdir.joinpath(sample_run_id, "output")
 
+        materialize_duration_ms: int = 0
+        veritas_duration_ms: int = 0
+        peak_memory_mb: float = 0.0
+
         self.reporter.emit(
             "sample_started",
             sample_run_id=sample_run_id,
@@ -255,7 +259,13 @@ class ExecutionAttempt:
         }
 
         if not outcome.success:
-            payload["failure_class"] = outcome.status.value
+            logger.error(
+                "Sample %s execution failed with internal status '%s': %s",
+                sample_run_id,
+                outcome.status.value,
+                outcome.message,
+            )
+            payload["failure_class"] = outcome.status.spec_failure_class
             payload["detail"] = outcome.message[:2000]
 
         self.reporter.emit(
@@ -372,6 +382,20 @@ class ExecutionAttempt:
             duration_ms = int((time.monotonic() - started) * 1000)
             veritas_ver = _veritas_version()
 
+            if status is not StatusClass.SUCCESS:
+                logger.error(
+                    "Attempt %s finished with terminal state '%s' and internal status '%s'",
+                    self.attempt_id,
+                    terminal_state,
+                    status.value,
+                )
+            else:
+                logger.info(
+                    "Attempt %s finished with terminal state '%s'",
+                    self.attempt_id,
+                    terminal_state,
+                )
+
             self.reporter.emit(
                 event,
                 payload={
@@ -381,7 +405,7 @@ class ExecutionAttempt:
                     "samples_total": len(manifest.samples),
                     "samples_succeeded": len(succeeded),
                     "samples_unprocessed": unprocessed,
-                    "failure_class": None if status is StatusClass.SUCCESS else status.value,
+                    "failure_class": None if status is StatusClass.SUCCESS else status.spec_failure_class,
                 },
             )
 

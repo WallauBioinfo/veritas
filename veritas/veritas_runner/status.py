@@ -30,7 +30,7 @@ class StatusClass(str, Enum):
     CONFIG_ERROR = "config_error" # NEW
     EXECUTOR_UNAVAILABLE = "executor_unavailable"
 
-    TIMEOUT = "processing_timeout"
+    PROCESSING_TIMEOUT = "processing_timeout"
     DEADLINE_EXCEEDED = "deadline_exceeded" # NEW
     VERITAS_CRASHED = "veritas_crashed" # NEW
     SYSTEM_RESOURCE_EXHAUSTED = "system_resource_exhausted"  # NEW: OOM-killed subprocess; see retry.py VERITAS_ENGINE
@@ -86,14 +86,13 @@ class StatusClass(str, Enum):
             return 30 
         if self in {StatusClass.CHECKSUM_MISMATCH, StatusClass.ARTEFACT_INVALID}:
             return 35
-        if self in {StatusClass.TIMEOUT, StatusClass.DEADLINE_EXCEEDED}:
+        if self in {StatusClass.PROCESSING_TIMEOUT, StatusClass.DEADLINE_EXCEEDED}:
             return 38
         if self is StatusClass.SYSTEM_RESOURCE_EXHAUSTED:
             return 39
         if self in {StatusClass.VERITAS_CRASHED, StatusClass.EXECUTOR_UNAVAILABLE}:
             return 40
         if self in {
-            StatusClass.OUTPUT_INVALID,
             StatusClass.METRICS_MISSING,
             StatusClass.CALLBACK_INVALID,
             StatusClass.CALLBACK_FAILED,
@@ -120,7 +119,7 @@ class StatusClass(str, Enum):
             StatusClass.UPSTREAM_UNAVAILABLE,  # -> mapped below to executor_unavailable
             StatusClass.DOWNLOAD_FAILED,
             StatusClass.CHECKSUM_MISMATCH,
-            StatusClass.TIMEOUT,
+            StatusClass.PROCESSING_TIMEOUT,
             StatusClass.METRICS_MISSING,
             StatusClass.CALLBACK_INVALID,
             StatusClass.INTERNAL_ERROR,
