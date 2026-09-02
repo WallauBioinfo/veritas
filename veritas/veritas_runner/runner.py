@@ -268,8 +268,9 @@ class ExecutionAttempt:
             payload["failure_class"] = outcome.status.spec_failure_class
             payload["detail"] = outcome.message[:2000]
 
+        # TODO: fix to include sample_completed_with_warnings and sample_not_evaluable
         self.reporter.emit(
-            "sample_completed" if outcome.success else "sample_failed",
+            "sample_completed" if outcome.success else "sample_failed", 
             sample_run_id=sample_run_id,
             payload=payload,
             deadline=self.deadline,
@@ -304,6 +305,7 @@ class ExecutionAttempt:
             outcomes.
         """
         started = time.monotonic()
+        fail = fail.bind(attempt_id=self.attempt_id)
 
         try:
             manifest: Manifest = CONTROL_PLANE.run(
@@ -332,7 +334,7 @@ class ExecutionAttempt:
                             f"Operational deadline reached after {len(outcomes)}/"
                             f"{len(samples)} samples; remaining samples left pending."
                         )
-                    ).bind(attempt_id=self.attempt_id)
+                    )
                     
                     break
 
@@ -345,7 +347,7 @@ class ExecutionAttempt:
                             f"Available: {capacity['free_GiB']:.2f} GiB, "
                             f"Required: {capacity['est_needed_GiB']:.2f} GiB."
                         ),
-                    ).bind(attempt_id=self.attempt_id)
+                    )
                     
                     break
 
@@ -354,14 +356,14 @@ class ExecutionAttempt:
                     per_sample_timeout_s=max(1, int(self.deadline - time.monotonic())),
                 )
 
+                outcomes.append(outcome)
+
                 if outcome.status in (StatusClass.CONFIG_ERROR, StatusClass.AUTH_REJECTED):
                     stopped_early = fail(
                         failure_class=outcome.status,
                         message=f"Aborting attempt: {outcome.message}",
-                    ).bind(attempt_id=self.attempt_id)
+                    )
                     break
-
-                outcomes.append(outcome)
 
             succeeded = [s for s in outcomes if s.success]
             unprocessed = len(samples) - len(outcomes)
