@@ -281,7 +281,7 @@ class ExecutionAttempt:
     def run_attempt(
         self,
         fail: ErrorFactory
-   ) -> AttemptResult:
+    ) -> AttemptResult:
         """
         Execute one execution attempt end-to-end and return its terminal state.
 
@@ -368,53 +368,29 @@ class ExecutionAttempt:
             succeeded = [s for s in outcomes if s.success]
             unprocessed = len(samples) - len(outcomes)
 
-            if succeeded and len(succeeded) == len(samples):
-                terminal_state, status, event = "Completed", StatusClass.SUCCESS, "attempt_completed"
-            elif succeeded:
-                terminal_state, event = "Partial", "attempt_partial"
-                status = stopped_early.failure_class if stopped_early else StatusClass.SUCCESS
+            if len(succeeded) == len(samples):
+                event_type = "attempt_completed"
+            elif unprocessed > 0:
+                event_type = "attempt_partial"
             else:
-                terminal_state, event = "Failed", "attempt_failed"
-                status = (
-                    stopped_early.failure_class
-                    if stopped_early
-                    else (outcomes[0].status if outcomes else StatusClass.INTERNAL_ERROR)
-                )
+                event_type = "attempt_failed"
 
             duration_ms = int((time.monotonic() - started) * 1000)
             veritas_ver = _veritas_version()
 
-            if status is not StatusClass.SUCCESS:
-                logger.error(
-                    "Attempt %s finished with terminal state '%s' and internal status '%s'",
-                    self.attempt_id,
-                    terminal_state,
-                    status.value,
-                )
-            else:
-                logger.info(
-                    "Attempt %s finished with terminal state '%s'",
-                    self.attempt_id,
-                    terminal_state,
-                )
-
             self.reporter.emit(
-                event,
+                event_type,
                 payload={
-                    "terminal_state": terminal_state,
                     "duration_ms": duration_ms,
                     "veritas_version": veritas_ver,
                     "samples_total": len(manifest.samples),
                     "samples_succeeded": len(succeeded),
-                    "samples_unprocessed": unprocessed,
-                    "failure_class": None if status is StatusClass.SUCCESS else status.spec_failure_class,
-                },
+                    "samples_unprocessed": unprocessed                },
             )
 
             return AttemptResult(
                 attempt_id=self.attempt_id,
-                terminal_state=terminal_state,
-                status=status,
+                terminal_state=event_type,
                 duration_ms=duration_ms,
                 veritas_version=veritas_ver,
                 samples=outcomes,
