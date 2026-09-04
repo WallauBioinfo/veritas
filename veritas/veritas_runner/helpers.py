@@ -1,26 +1,28 @@
 # veritas_runner/helpers.py
 #
-# Local preflight checks run before any PathoEQA network call (SPEC phase 1a).
+# Local checks performed before any PathoEQA network call.
 
 from __future__ import annotations
 
 import os
 import shutil
 import uuid
+from pathlib import Path
 from urllib.parse import urlparse
 
 from veritas_runner.exceptions import VeritasRunnerError
 from veritas_runner.status import StatusClass
 
 
-def _validate_prerequisites(
+def validate_prerequisites(
     attempt_id: str,
     workdir: str | Path,
     api_url: str,
     oidc_token: str,
-) -> None:
+) -> Path:
     """
-    Validate local environment and caller inputs before any network I/O.
+    Validate local environment and caller inputs before any network I/O,
+    and return the canonicalized workdir Path for the caller to use.
 
     Covers everything knowable from the invocation context alone: attempt_id
     shape, PathoEQA endpoint configuration, OIDC credential presence, workspace
@@ -72,61 +74,31 @@ def _validate_prerequisites(
                 attempt_id=attempt_id,
             )
 
-    if not workdir or not workdir.strip():
+    if not workdir or (isinstance(workdir, str) and not workdir.strip()):
         raise VeritasRunnerError(
             StatusClass.CONFIG_ERROR,
             "workdir is missing or empty.",
             attempt_id=attempt_id,
         )
 
-    try:
-        os.makedirs(workdir, exist_ok=True)
-    except OSError as e:
-        raise VeritasRunnerError(
-            StatusClass.CONFIG_ERROR,
-            f"Could not create workspace '{workdir}': {e}",
-            attempt_id=attempt_id,
-        ) from e
 
-    if not os.access(workdir, os.W_OK):
-        raise VeritasRunnerError(
-            StatusClass.CONFIG_ERROR,
-            f"Workspace '{workdir}' is not writable.",
-            attempt_id=attempt_id,
-        )
-
-def _validate_workdir(
-    attempt_id: str,
-    workdir: str | Path,
-    api_url: str,
-    oidc_token: str,
-) -> Path:
-    """Validate environment prerequisites and return a canonical workdir Path."""
-    if not attempt_id:
-        raise VeritasRunnerError(
-            failure_class=StatusClass.CONFIG_ERROR,
-            message="attempt_id is required.",
-        )
-
+def normalize_workdir(workdir: str | Path, attempt_id: str) -> Path:
     workdir_path = Path(workdir).resolve()
 
     try:
         workdir_path.mkdir(parents=True, exist_ok=True)
     except OSError as e:
         raise VeritasRunnerError(
-            failure_class=StatusClass.CONFIG_ERROR,
-            message=f"Cannot create workdir at '{workdir_path}': {e}",
+            StatusClass.CONFIG_ERROR,
+            f"Could not create workspace '{workdir_path}': {e}",
+            attempt_id=attempt_id,
         ) from e
 
-    if not workdir_path.is_dir():
+    if not os.access(workdir_path, os.W_OK):
         raise VeritasRunnerError(
-            failure_class=StatusClass.CONFIG_ERROR,
-            message=f"workdir is not a directory: {workdir_path}",
+            StatusClass.CONFIG_ERROR,
+            f"Workspace '{workdir_path}' is not writable.",
+            attempt_id=attempt_id,
         )
-
-    # Validate API URL and tokens...
-
-
-    #TODO: accept workdir as Path
 
     return workdir_path

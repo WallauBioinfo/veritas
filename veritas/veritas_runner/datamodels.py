@@ -1,7 +1,7 @@
 from typing import List, Optional, Self, Literal, Dict
 from pydantic import BaseModel, Field, model_validator, field_validator
 from dataclasses import dataclass, field
-from status import StatusClass
+from veritas_runner.status import StatusClass
 
 class ManifestFile(BaseModel):
     role: str
@@ -105,8 +105,8 @@ class SampleInput(BaseModel):
         t_size = [self.query_input.size, *[f.size for f in self.truth_bundle.files]]
         return {
             "total_files":len(t_size),
-            "missing_size_count": t_size.count(None),
-            "known_size": sum(s for s in t_size if s is not None)}
+            "missing_count": t_size.count(None),
+            "known_bytes": sum(s for s in t_size if s is not None)}
     
 class Manifest(BaseModel):
     schema_version: str
@@ -207,4 +207,4 @@ class AttemptResult:
 
     @property
     def exit_code(self) -> int:
-        return 0 if not "attempt_failed" else 1 # TODO: Check correctedness
+        return 0 if self.terminal_state != "attempt_failed" else 1 # TODO: Check correctedness

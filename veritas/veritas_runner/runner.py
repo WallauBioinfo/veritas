@@ -29,7 +29,7 @@ from veritas_runner.datamodels import (
     AttemptResult,
 )
 from veritas_runner.exceptions import ErrorFactory, VeritasRunnerError
-from veritas_runner.helpers import _validate_prerequisites
+from veritas_runner.helpers import validate_prerequisites, normalize_workdir
 from veritas_runner.pathoeqa import PathoEQAClient
 from veritas_runner.retry import CONTROL_PLANE, DATA_PLANE, VERITAS_ENGINE
 from veritas_runner.status import StatusClass
@@ -65,10 +65,10 @@ class ExecutionAttempt:
         api_url = api_url or os.getenv("PATHOEQA_API_URL", "")
         oidc_token = oidc_token or os.getenv("GITHUB_OIDC_TOKEN", "")
         
-        _validate_prerequisites(attempt_id, workdir, api_url, oidc_token)
+        validate_prerequisites(attempt_id, workdir, api_url, oidc_token)
         
         self.attempt_id = attempt_id
-        self.workdir = Path(workdir)
+        self.workdir = normalize_workdir(workdir)
         self.dry_run = dry_run
         self.deadline: float | None = None
 
