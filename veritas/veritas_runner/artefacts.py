@@ -57,7 +57,8 @@ class ArtefactClass:
     chunk_bytes : int
         Resolved chunk buffer size in bytes.
     """
-
+    # TODO: implement correct range-based retry logic. Currently atomic.
+    
     _ARCHIVE_SUFFIXES: ClassVar[tuple[str,...]] = (".tar.gz", ".tgz", ".tar", ".zip")
 
     DEFAULT_CONNECT_TIMEOUT_S: ClassVar[float] = 10.0
