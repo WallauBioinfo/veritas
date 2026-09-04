@@ -10,8 +10,8 @@ import uuid
 from pathlib import Path
 from urllib.parse import urlparse
 
-from veritas_runner.exceptions import VeritasRunnerError
-from veritas_runner.status import StatusClass
+from .exceptions import VeritasRunnerError
+from .status import StatusClass
 
 
 def validate_prerequisites(

@@ -11,9 +11,9 @@ from typing import Optional, ClassVar
 from pathlib import Path
 import requests
 
-from veritas_runner.datamodels import ManifestFile
-from veritas_runner.exceptions import ErrorFactory, HttpSurface, VeritasRunnerError
-from veritas_runner.status import StatusClass
+from .datamodels import ManifestFile
+from .exceptions import ErrorFactory, HttpSurface, VeritasRunnerError
+from .status import StatusClass
 
 logger = logging.getLogger(__name__)
 

@@ -24,8 +24,8 @@ from typing import Any, Callable, Literal, Optional, TypeVar, Union
 
 from pydantic import BaseModel, Field, PositiveFloat
 
-from veritas_runner.exceptions import VeritasRunnerError
-from veritas_runner.status import StatusClass
+from .exceptions import VeritasRunnerError
+from .status import StatusClass
 
 logger = logging.getLogger(__name__)
 

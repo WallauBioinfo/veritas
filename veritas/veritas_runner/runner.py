@@ -21,20 +21,20 @@ from pathlib import Path
 from typing import Any, List, Optional
 import requests
 
-from veritas_runner.datamodels import (
+from .datamodels import (
     Manifest,
     ManifestFile,
     SampleInput,
     SampleOutcome,
     AttemptResult,
 )
-from veritas_runner.exceptions import ErrorFactory, VeritasRunnerError
-from veritas_runner.helpers import validate_prerequisites, normalize_workdir
-from veritas_runner.pathoeqa import PathoEQAClient
-from veritas_runner.retry import CONTROL_PLANE, DATA_PLANE, VERITAS_ENGINE
-from veritas_runner.status import StatusClass
-from veritas_runner.artefacts import ArtefactClass
-from veritas_runner.reporter import AttemptReporter
+from .exceptions import ErrorFactory, VeritasRunnerError
+from .helpers import validate_prerequisites, normalize_workdir
+from .pathoeqa import PathoEQAClient
+from .retry import CONTROL_PLANE, DATA_PLANE, VERITAS_ENGINE
+from .status import StatusClass
+from .artefacts import ArtefactClass
+from .reporter import AttemptReporter
 
 logger = logging.getLogger(__name__)
 

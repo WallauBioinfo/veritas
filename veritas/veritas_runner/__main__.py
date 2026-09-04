@@ -3,9 +3,9 @@ import json
 import os
 import sys
 
-from veritas_runner.exceptions import ErrorFactory, VeritasRunnerError
-from veritas_runner.runner import ExecutionAttempt
-from veritas_runner.status import StatusClass
+from .exceptions import ErrorFactory, VeritasRunnerError
+from .runner import ExecutionAttempt
+from .status import StatusClass
 
 
 def main() -> int:

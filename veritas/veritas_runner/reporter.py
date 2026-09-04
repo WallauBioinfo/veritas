@@ -4,10 +4,10 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
-from veritas_runner.datamodels import CallbackEnvelope
-from veritas_runner.exceptions import VeritasRunnerError
-from veritas_runner.pathoeqa import PathoEQAClient
-from veritas_runner.retry import CONTROL_PLANE
+from .datamodels import CallbackEnvelope
+from .exceptions import VeritasRunnerError
+from .pathoeqa import PathoEQAClient
+from .retry import CONTROL_PLANE
 
 logger = logging.getLogger(__name__)
 

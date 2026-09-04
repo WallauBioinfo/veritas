@@ -13,8 +13,8 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import ClassVar, Optional
 
-from veritas_runner.status import StatusClass
-from veritas_runner.datamodels import CallbackPayload
+from .status import StatusClass
+from .datamodels import CallbackPayload
 
 
 class VeritasRunnerError(Exception):

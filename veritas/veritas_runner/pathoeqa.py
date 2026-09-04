@@ -13,9 +13,9 @@ import icontract
 import requests
 from pydantic import ValidationError
 
-from veritas_runner.datamodels import CallbackEnvelope, Manifest
-from veritas_runner.exceptions import VeritasRunnerError, ErrorFactory, HttpSurface
-from veritas_runner.status import StatusClass
+from .datamodels import CallbackEnvelope, Manifest
+from .exceptions import VeritasRunnerError, ErrorFactory, HttpSurface
+from .status import StatusClass
 
 logger = logging.getLogger(__name__)
 

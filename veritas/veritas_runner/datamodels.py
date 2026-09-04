@@ -1,7 +1,7 @@
 from typing import List, Optional, Self, Literal, Dict
 from pydantic import BaseModel, Field, model_validator, field_validator
 from dataclasses import dataclass, field
-from veritas_runner.status import StatusClass
+from .status import StatusClass
 
 class ManifestFile(BaseModel):
     role: str
