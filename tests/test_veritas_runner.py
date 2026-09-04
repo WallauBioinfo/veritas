@@ -3,14 +3,14 @@ from unittest.mock import MagicMock, patch
 import subprocess
 import pytest
 
-from veritas_runner.exceptions import (
+from veritas.veritas_runner.exceptions import (
     ErrorFactory,
     HttpFailureClassifier,
     HttpSurface,
     VeritasRunnerError,
 )
-from veritas_runner.runner import _check_storage_capacity, _run_veritas, _scan_metrics_for_undefined
-from veritas_runner.status import StatusClass
+from veritas.veritas_runner.runner import _check_storage_capacity, _run_veritas, _scan_metrics_for_undefined
+from veritas.veritas_runner.status import StatusClass
 
 
 # --- 1. HttpFailureClassifier Tests (exceptions.py) ---
