@@ -526,7 +526,7 @@ def _run_veritas(
             f"Veritas process crashed unexpectedly ({detail}).",
         ) from e
 
-    metrics_file = output_dir / "metrics.tsv"
+    metrics_file = output_dir / "metrics.tsv" #TODO restrict output_dir type hint: only path
     if not metrics_file.is_file() or metrics_file.stat().st_size == 0:
         raise fail(
             StatusClass.METRICS_MISSING,
