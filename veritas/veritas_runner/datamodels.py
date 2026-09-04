@@ -168,11 +168,18 @@ class CallbackPayload(BaseModel):
     detail: str
     duration_seconds: Optional[float] = None
 
+SampleState = Literal[
+    "sample_completed",
+    "sample_completed_with_warnings",
+    "sample_not_evaluable",
+    "sample_failed",
+]
 
 @dataclass
 class SampleOutcome:
     sample_run_id: str
     status: StatusClass
+    terminal_state: SampleState = "sample_completed"
     message: str = ""
     duration_ms: int = 0
 
@@ -180,16 +187,24 @@ class SampleOutcome:
     def success(self) -> bool:
         return self.status is StatusClass.SUCCESS
 
+    @property
+    def is_completed(self) -> bool:
+        """Returns True if the sample produced valid/inspectable results."""
+        return self.terminal_state in (
+            "sample_completed",
+            "sample_completed_with_warnings",
+            "sample_not_evaluable",
+        )
+
 
 @dataclass
 class AttemptResult:
     attempt_id: str
-    terminal_state: Literal["Completed", "Partial", "Failed"]
-    status: StatusClass
+    terminal_state: Literal["attempt_completed", "attempt_partial", "attempt_failed"]
     duration_ms: int
     veritas_version: str
     samples: List[SampleOutcome] = field(default_factory=list)
 
     @property
     def exit_code(self) -> int:
-        return self.status.exit_code
+        return 0 if not "attempt_failed" else 1 # TODO: Check correctedness

@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import csv
 import logging
 import os
 import resource
@@ -203,6 +204,11 @@ class ExecutionAttempt:
         veritas_duration_ms: int = 0
         peak_memory_mb: float = 0.0
 
+        # TODO: implement non_evaluable and completed_with_warnings sample classification
+        # TODO: implement (N-proportion etc.)
+        undefined_metrics: list[dict[str, str]] = []
+        warnings_found: list[str] = []
+                                         
         self.reporter.emit(
             "sample_started",
             sample_run_id=sample_run_id,
@@ -233,16 +239,51 @@ class ExecutionAttempt:
                 veritas_duration_ms = int((time.monotonic() - veritas_started) * 1000)
                 mem_after = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
                 peak_memory_mb = round(max(mem_before, mem_after) / 1024, 2)
+            
+            
+            # TODO: logic below is currently unreachable
+            
+            undefined_metrics = _scan_metrics_for_undefined(output_dir / "metrics.tsv")
 
-            outcome = SampleOutcome(sample_run_id, StatusClass.SUCCESS)
+            if undefined_metrics:
+                status = StatusClass.NOT_EVALUABLE
+                state = "sample_not_evaluable"
+                detail = "; ".join(
+                    f"{m['variant_type']}/{m['metric']}" for m in undefined_metrics
+                )
+                message = f"Undefined due to genuine zero-denominator: {detail}."
+            elif warnings_found:
+                status = StatusClass.SUCCESS  # TODO: needs its own StatusClass
+                state = "sample_completed_with_warnings"
+                message = f"Sample evaluated with warnings: {'; '.join(warnings_found)}"
+            else:
+                status = StatusClass.SUCCESS
+                state = "sample_completed"
+                message = ""
+
+            outcome = SampleOutcome(
+                sample_run_id,
+                StatusClass.SUCCESS,
+                "sample_completed", # TODO: replace with state
+                "message")
+
         except VeritasRunnerError as e:
-            outcome = SampleOutcome(sample_run_id, e.failure_class, str(e))
+            outcome = SampleOutcome(
+                sample_run_id,
+                e.failure_class,
+                "sample_failed",
+                str(e))
+
         except Exception as e:
             wrapped = VeritasRunnerError.wrap(
                 e, context=f"processing sample {sample_run_id}",
                 attempt_id=self.attempt_id, sample_run_id=sample_run_id,
             )
-            outcome = SampleOutcome(sample.sample_run_id, wrapped.failure_class, str(wrapped))
+            outcome = SampleOutcome(
+                sample.sample_run_id,
+                wrapped.failure_class,
+                "sample_failed",
+                str(wrapped))
 
         outcome.duration_ms = int((time.monotonic() - started) * 1000)
 
@@ -268,9 +309,8 @@ class ExecutionAttempt:
             payload["failure_class"] = outcome.status.spec_failure_class
             payload["detail"] = outcome.message[:2000]
 
-        # TODO: fix to include sample_completed_with_warnings and sample_not_evaluable
         self.reporter.emit(
-            "sample_completed" if outcome.success else "sample_failed", 
+            event_type = outcome.terminal_state, 
             sample_run_id=sample_run_id,
             payload=payload,
             deadline=self.deadline,
@@ -324,7 +364,6 @@ class ExecutionAttempt:
             )
 
             outcomes: List[SampleOutcome] = []
-            stopped_early: Optional[VeritasRunnerError] = None
 
             for sample in sorted(samples, key=lambda s: s.sample_order):
                 if time.monotonic() > self.deadline:
@@ -335,7 +374,7 @@ class ExecutionAttempt:
                             f"{len(samples)} samples; remaining samples left pending."
                         )
                     )
-                    
+                    logger.warning(str(stopped_early))
                     break
 
                 capacity = _check_storage_capacity(self.workdir, sample.total_size)
@@ -348,7 +387,7 @@ class ExecutionAttempt:
                             f"Required: {capacity['est_needed_GiB']:.2f} GiB."
                         ),
                     )
-                    
+                    logger.warning(str(stopped_early))
                     break
 
                 outcome = self._process_sample(
@@ -363,29 +402,34 @@ class ExecutionAttempt:
                         failure_class=outcome.status,
                         message=f"Aborting attempt: {outcome.message}",
                     )
+                    logger.warning(str(stopped_early))
                     break
 
-            succeeded = [s for s in outcomes if s.success]
-            unprocessed = len(samples) - len(outcomes)
+            completed_outcomes = [o for o in outcomes if o.is_completed]
+            total_samples = len(manifest.samples)
+            num_completed = len(completed_outcomes)
 
-            if len(succeeded) == len(samples):
+            if num_completed == total_samples:
                 event_type = "attempt_completed"
-            elif unprocessed > 0:
-                event_type = "attempt_partial"
-            else:
+            elif num_completed == 0:
                 event_type = "attempt_failed"
-
+            else:
+                event_type = "attempt_partial"
+            
             duration_ms = int((time.monotonic() - started) * 1000)
             veritas_ver = _veritas_version()
 
+            payload: dict[str, Any] = {
+                "duration_ms": duration_ms,
+                "veritas_version": veritas_ver,
+                "samples_total": total_samples,
+                "samples_completed": num_completed,
+                "samples_failed_or_pending": total_samples - num_completed,
+            }
+
             self.reporter.emit(
                 event_type,
-                payload={
-                    "duration_ms": duration_ms,
-                    "veritas_version": veritas_ver,
-                    "samples_total": len(manifest.samples),
-                    "samples_succeeded": len(succeeded),
-                    "samples_unprocessed": unprocessed                },
+                payload=payload
             )
 
             return AttemptResult(
@@ -581,3 +625,58 @@ def _check_storage_capacity(
         "free_GiB": free_bytes / (1024**3),
         "passed": passed,
     }
+
+
+_UNDEFINED_METRIC_SENTINEL = "NA"  # TODO: PROVISIONAL: Relies on Veritas zero-denominator fix
+
+
+def _scan_metrics_for_undefined(metrics_file: Path) -> list[dict[str, str]]:
+    """
+    Scan a sample's metrics report for undefined precision or recall calculations.
+
+    Inspects a TSV metrics report for cells matching the undefined metric sentinel,
+    indicating a zero-denominator condition (e.g., zero truth variants or zero query calls).
+
+    Parameters
+    ----------
+    metrics_file : Path
+        Path to the sample's ``metrics.tsv`` file produced by Veritas.
+
+    Returns
+    -------
+    list of dict of str to str
+        A list of dictionaries identifying each undefined cell found in the global summary.
+        Each dictionary contains:
+
+        * ``"variant_type"`` : str
+            The variant classification (e.g., ``"SNV"``, ``"INDEL"``).
+        * ``"metric"`` : str
+            The undefined metric name (``"Precision"`` or ``"Recall"``).
+
+    Notes
+    -----
+    * **Upstream Dependency**: Current versions of Veritas write ``"0.0"`` for zero
+      denominators due to ``safe_div``. This function searches for
+      ``_UNDEFINED_METRIC_SENTINEL`` (``"NA"``), which Veritas will write once
+      the upstream zero-denominator fix lands. Until then, this returns ``[]``.
+    * **Regional Scope**: Only inspects rows where ``Region == "ALL"``. Optional BED
+      sub-regions (``PRIMER``, ``MASK``, etc.) are sparse by design, so an empty
+      sub-region should not flag an entire sample as ``sample_not_evaluable``.
+    * **F1-Score Excluded**: F1-Score is derived from Precision and Recall and is
+      omitted to avoid redundant error reporting.
+    """
+    if not metrics_file.is_file():
+        return []
+
+    undefined: list[dict[str, str]] = []
+    with open(metrics_file, newline="") as f:
+        reader = csv.DictReader(f, delimiter="\t")
+        for row in reader:
+            if row.get("Region") != "ALL":
+                continue
+            for metric in ("Precision", "Recall"):
+                if row.get(metric) == _UNDEFINED_METRIC_SENTINEL:
+                    undefined.append(
+                        {"variant_type": row.get("Category", "?"), "metric": metric}
+                    )
+    return undefined
