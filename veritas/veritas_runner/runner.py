@@ -68,7 +68,7 @@ class ExecutionAttempt:
         validate_prerequisites(attempt_id, workdir, api_url, oidc_token)
         
         self.attempt_id = attempt_id
-        self.workdir = normalize_workdir(workdir)
+        self.workdir = normalize_workdir(workdir, self.attempt_id)
         self.dry_run = dry_run
         self.deadline: float | None = None
 
