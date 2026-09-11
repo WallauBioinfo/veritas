@@ -130,7 +130,8 @@ class ExecutionAttempt:
             filename = artefact.url.split("?")[0].rsplit("/", 1)[-1]
             dest = sample_dir / f"{artefact.role}_{filename}"
 
-            fetched = DATA_PLANE.run(
+            # TODO: use DATA_PLANE instead
+            fetched = CONTROL_PLANE.run(
                 lambda : artefact_handler.download(artefact, dest, deadline=self.deadline),
                 description=f"download {artefact.role}",
                 deadline=self.deadline,
