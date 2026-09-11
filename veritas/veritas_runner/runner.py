@@ -265,8 +265,8 @@ class ExecutionAttempt:
             outcome = SampleOutcome(
                 sample_run_id,
                 StatusClass.SUCCESS,
-                "sample_completed", # TODO: replace with state
-                "message")
+                state,
+                message)
 
         except VeritasRunnerError as e:
             outcome = SampleOutcome(
@@ -398,7 +398,10 @@ class ExecutionAttempt:
 
                 outcomes.append(outcome)
 
-                if outcome.status in (StatusClass.CONFIG_ERROR, StatusClass.AUTH_REJECTED):
+                if outcome.status in (
+                    StatusClass.CONFIG_ERROR,
+                    StatusClass.AUTH_REJECTED,
+                    StatusClass.EXECUTOR_UNAVAILABLE):
                     stopped_early = fail(
                         failure_class=outcome.status,
                         message=f"Aborting attempt: {outcome.message}",
