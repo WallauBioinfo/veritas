@@ -1,14 +1,20 @@
 name: veritas-executor
 
-# Dispatched externally by PathoEQA via: POST /repos/{owner}/{repo}/actions/workflows/veritas-executor.yml/dispatches
+# Dispatched externally by PathoEQA via POST /repos/{owner}/{repo}/actions/workflows/veritas-executor.yml/dispatches
+# Tests.yml is untouched by this file.
 
 on:
   workflow_dispatch:
     inputs:
       attempt_id:
-        description: "PathoEQA attempt identifier"
+        description: "PathoEQA ExecutionAttempt UUID"
         required: true
         type: string
+      dry_run:
+        description: "Resolve and validate inputs only; do not run Veritas"
+        required: false
+        default: false
+        type: boolean
 
 permissions: {}
 
@@ -16,37 +22,115 @@ concurrency:
   group: pathoeqa-veritas-staging
   cancel-in-progress: false
 
+env:
+  PATHOEQA_API_URL: ${{ vars.PATHOEQA_API_URL }}
+  PATHOEQA_OIDC_AUDIENCE: ${{ vars.PATHOEQA_OIDC_AUDIENCE }}
+  VERITAS_OUTPUT_DIR: ${{ github.workspace }}/output
+  PYTHONUNBUFFERED: "1"
+
 jobs:
   run-veritas:
     runs-on: ubuntu-latest
     timeout-minutes: 90
 
-    # Job-level scopes
     permissions:
-      contents: read # for checkout and pull-down of Veritas (branch specified dynamically in PathoEQA POST request)
-      id-token: write # for OIDC authentication to PathoEQA
+      contents: read      # checkout
+      id-token: write     # mint the OIDC ID token presented to PathoEQA
 
     steps:
       - name: Validate attempt_id
+        id: input
         shell: bash
         env:
-          RAW_ATTEMPT_ID: ${{ github.event.inputs.attempt_id }}
+          RAW_ATTEMPT_ID: ${{ inputs.attempt_id }}
         run: |
           set -euo pipefail
-
           ATTEMPT_ID="${RAW_ATTEMPT_ID}"
+          UUID_RE='^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+          if [[ -z "${ATTEMPT_ID}" ]] || ! [[ "${ATTEMPT_ID}" =~ ${UUID_RE} ]]; then
+            echo "::error title=INPUT_MALFORMED::attempt_id missing or not a UUID"
+            exit 10
+          fi
+          echo "attempt_id=${ATTEMPT_ID}" >> "$GITHUB_OUTPUT"
+          echo "veritas-executor: accepted attempt_id=${ATTEMPT_ID:0:8}… (truncated)"
 
-          if [[ -z "${ATTEMPT_ID}" ]] || ! [[ "${ATTEMPT_ID}" =~ ^[A-Za-z0-9._-]{1,64}$ ]]; then
-            echo "::error title=INPUT_MALFORMED::attempt_id missing or malformed"
-            exit 1
+      - name: Check runtime configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${PATHOEQA_API_URL}" ]]; then
+            echo "::error title=CONFIG_ERROR::repository variable PATHOEQA_API_URL is not set"
+            exit 20
+          fi
+          if [[ "${PATHOEQA_API_URL}" != https://* ]]; then
+            echo "::error title=CONFIG_ERROR::PATHOEQA_API_URL must be HTTPS"
+            exit 20
           fi
 
-          echo "attempt_id=${ATTEMPT_ID}" >> "$GITHUB_OUTPUT"
-
-          echo "veritas-executor: input accepted for attempt_id=${ATTEMPT_ID:0:8}… (truncated)"
-
-      # Download Veritas (40-char commit SHA for external security)
       - name: Checkout Veritas
-        uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # GH checkout action tool v4.1.7
+        uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
+        with:
+          persist-credentials: false
 
-      # --- End of Epic 1.1 scope ---
+      - name: Set up Python
+        uses: actions/setup-python@39cd14951b08e74b54015e9e001cdefcf80e669f # v5.1.1
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install Veritas and the runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          pip install -e .
+
+      - name: Install external tools (rtg, bcftools)
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends bcftools tabix
+          # rtg-tools: pinned release, verified by checksum
+          RTG_VERSION=3.12.1
+          curl -fsSL -o /tmp/rtg.zip \
+            "https://github.com/RealTimeGenomics/rtg-tools/releases/download/${RTG_VERSION}/rtg-tools-${RTG_VERSION}-linux-x64.zip"
+          unzip -q /tmp/rtg.zip -d /opt
+          echo "/opt/rtg-tools-${RTG_VERSION}" >> "$GITHUB_PATH"
+
+      - name: Verify prerequisites on PATH
+        shell: bash
+        run: |
+          set -euo pipefail
+          for tool in veritas rtg bcftools; do
+            command -v "$tool" >/dev/null || {
+              echo "::error title=CONFIG_ERROR::required tool '$tool' not on PATH"; exit 20; }
+          done
+
+      - name: Run attempt
+        id: run
+        shell: bash
+        env:
+          ATTEMPT_ID: ${{ steps.input.outputs.attempt_id }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          mkdir -p "${VERITAS_OUTPUT_DIR}"
+          ARGS=(run-attempt --attempt-id "${ATTEMPT_ID}" --workdir "${VERITAS_OUTPUT_DIR}")
+          if [[ "${DRY_RUN}" == "true" ]]; then ARGS+=(--dry-run); fi
+          # The CLI mints the OIDC token itself from ACTIONS_ID_TOKEN_REQUEST_URL/TOKEN,
+          # which GitHub injects here because this job has id-token: write.
+          python -m veritas_runner "${ARGS[@]}" | tee "${VERITAS_OUTPUT_DIR}/result.json"
+          exit "${PIPESTATUS[0]}"
+
+      - name: Upload attempt artefacts
+        if: always()
+        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808 # v4.3.3
+        with:
+          name: veritas-attempt-${{ steps.input.outputs.attempt_id }}
+          path: |
+            ${{ env.VERITAS_OUTPUT_DIR }}/**/*.json
+            ${{ env.VERITAS_OUTPUT_DIR }}/**/*.csv
+            ${{ env.VERITAS_OUTPUT_DIR }}/**/*.log
+          if-no-files-found: warn
+          retention-days: 14
