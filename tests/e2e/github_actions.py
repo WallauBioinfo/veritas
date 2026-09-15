@@ -40,7 +40,6 @@ class GitHubActionsClient:
             "Accept": "application/vnd.github+json",
             "X-GitHub-Api-Version": "2022-11-28",
         }
-
     def dispatch(self, ref: str, attempt_id: str, dry_run: bool) -> datetime:
         dispatched_at = datetime.now(timezone.utc)
         resp = requests.post(
@@ -52,17 +51,17 @@ class GitHubActionsClient:
         resp.raise_for_status()
         return dispatched_at
 
-    def find_run(self, ref: str, dispatched_at: datetime, timeout_s: int = 30) -> dict:
+    def find_run(self, ref: str, dispatched_at: datetime, timeout_s: int = 60) -> dict:
         """
         workflow_dispatch returns no run id, so poll the runs list and match
-        the newest run created at/after the dispatch call. Inherent short
-        race: GitHub needs a moment to register the run.
+        the newest run created at/after dispatch that is not already completed.
         """
+        floor = dispatched_at.timestamp() - 2
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
             resp = requests.get(
                 f"{API}/repos/{self.repo}/actions/workflows/{WORKFLOW_FILE}/runs",
-                params={"branch": ref, "event": "workflow_dispatch", "per_page": 5},
+                params={"branch": ref, "event": "workflow_dispatch", "per_page": 10},
                 headers=self.headers,
                 timeout=15,
             )
@@ -71,10 +70,11 @@ class GitHubActionsClient:
                 created = datetime.strptime(run["created_at"], "%Y-%m-%dT%H:%M:%SZ").replace(
                     tzinfo=timezone.utc
                 )
-                if created >= dispatched_at:
+                # Skip completed runs from previous test steps
+                if created.timestamp() >= floor and run["status"] != "completed":
                     return run
             time.sleep(2)
-        raise TimeoutError(f"No matching run appeared on '{ref}' within {timeout_s}s of dispatch.")
+        raise TimeoutError(f"No matching active run appeared on '{ref}' within {timeout_s}s of dispatch.")
 
     def wait_for_completion(self, run_id: int, timeout_s: int = 900) -> dict:
         deadline = time.monotonic() + timeout_s
