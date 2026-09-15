@@ -15,7 +15,6 @@ import re
 import time
 import zipfile
 from dataclasses import dataclass
-from datetime import datetime, timezone
 
 import requests
 
@@ -29,6 +28,7 @@ class RunOutcome:
     html_url: str
     conclusion: str
     result_json: str | None
+    oidc_probe_json: str | None
     error_annotations: list[str]
 
 
@@ -40,8 +40,21 @@ class GitHubActionsClient:
             "Accept": "application/vnd.github+json",
             "X-GitHub-Api-Version": "2022-11-28",
         }
-    def dispatch(self, ref: str, attempt_id: str, dry_run: bool) -> datetime:
-        dispatched_at = datetime.now(timezone.utc)
+
+    def _get_existing_run_ids(self) -> set[int]:
+        """Snapshot all currently existing workflow run IDs prior to dispatching."""
+        resp = requests.get(
+            f"{API}/repos/{self.repo}/actions/workflows/{WORKFLOW_FILE}/runs",
+            params={"per_page": 20},
+            headers=self.headers,
+            timeout=15,
+        )
+        if resp.status_code == 200:
+            return {run["id"] for run in resp.json().get("workflow_runs", [])}
+        return set()
+
+    def dispatch(self, ref: str, attempt_id: str, dry_run: bool) -> None:
+        """Trigger the workflow_dispatch event."""
         resp = requests.post(
             f"{API}/repos/{self.repo}/actions/workflows/{WORKFLOW_FILE}/dispatches",
             json={"ref": ref, "inputs": {"attempt_id": attempt_id, "dry_run": dry_run}},
@@ -49,14 +62,12 @@ class GitHubActionsClient:
             timeout=15,
         )
         resp.raise_for_status()
-        return dispatched_at
 
-    def find_run(self, ref: str, dispatched_at: datetime, timeout_s: int = 60) -> dict:
+    def find_run(self, ref: str, existing_ids: set[int], timeout_s: int = 60) -> dict:
         """
-        workflow_dispatch returns no run id, so poll the runs list and match
-        the newest run created at/after dispatch that is not already completed.
+        Poll the workflow runs list and return the first run ID that was not
+        present before dispatching. Eliminates race conditions with past runs.
         """
-        floor = dispatched_at.timestamp() - 2
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
             resp = requests.get(
@@ -67,16 +78,13 @@ class GitHubActionsClient:
             )
             resp.raise_for_status()
             for run in resp.json().get("workflow_runs", []):
-                created = datetime.strptime(run["created_at"], "%Y-%m-%dT%H:%M:%SZ").replace(
-                    tzinfo=timezone.utc
-                )
-                # Skip completed runs from previous test steps
-                if created.timestamp() >= floor and run["status"] != "completed":
+                if run["id"] not in existing_ids:
                     return run
             time.sleep(2)
-        raise TimeoutError(f"No matching active run appeared on '{ref}' within {timeout_s}s of dispatch.")
+        raise TimeoutError(f"No new run appeared on '{ref}' within {timeout_s}s of dispatch.")
 
     def wait_for_completion(self, run_id: int, timeout_s: int = 900) -> dict:
+        """Poll a specific run until its status becomes 'completed'."""
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
             resp = requests.get(f"{API}/repos/{self.repo}/actions/runs/{run_id}", headers=self.headers, timeout=15)
@@ -87,22 +95,27 @@ class GitHubActionsClient:
             time.sleep(5)
         raise TimeoutError(f"Run {run_id} did not complete within {timeout_s}s.")
 
-    def fetch_result_json(self, run_id: int, attempt_id: str) -> str | None:
-        resp = requests.get(f"{API}/repos/{self.repo}/actions/runs/{run_id}/artifacts", headers=self.headers, timeout=15)
+    def fetch_artefact_files(self, run_id: int, attempt_id: str) -> dict[str, str]:
+        """Return {basename: text} for every JSON file in the attempt artefact."""
+        resp = requests.get(
+            f"{API}/repos/{self.repo}/actions/runs/{run_id}/artifacts", headers=self.headers, timeout=15
+        )
         resp.raise_for_status()
         artefact_name = f"veritas-attempt-{attempt_id}"
         match = next((a for a in resp.json().get("artifacts", []) if a["name"] == artefact_name), None)
         if match is None:
-            return None
+            return {}
         zip_resp = requests.get(match["archive_download_url"], headers=self.headers, timeout=30)
         zip_resp.raise_for_status()
+        files: dict[str, str] = {}
         with zipfile.ZipFile(io.BytesIO(zip_resp.content)) as zf:
             for name in zf.namelist():
-                if name.endswith("result.json"):
-                    return zf.read(name).decode("utf-8")
-        return None
+                if name.endswith(".json"):
+                    files[name.rsplit("/", 1)[-1]] = zf.read(name).decode("utf-8")
+        return files
 
     def fetch_error_annotations(self, run_id: int) -> list[str]:
+        """Fetch error annotations from the workflow run logs."""
         jobs_resp = requests.get(f"{API}/repos/{self.repo}/actions/runs/{run_id}/jobs", headers=self.headers, timeout=15)
         jobs_resp.raise_for_status()
         errors: list[str] = []
@@ -114,16 +127,27 @@ class GitHubActionsClient:
                 errors.extend(re.findall(r"::error[^\n]*", logs_resp.text))
         return errors
 
-    def run(self, ref: str, attempt_id: str, dry_run: bool, dispatch_timeout: int = 30, run_timeout: int = 900) -> RunOutcome:
-        dispatched_at = self.dispatch(ref, attempt_id, dry_run)
-        run = self.find_run(ref, dispatched_at, timeout_s=dispatch_timeout)
+    def run(
+        self,
+        ref: str,
+        attempt_id: str,
+        dry_run: bool,
+        dispatch_timeout: int = 60,
+        run_timeout: int = 900,
+    ) -> RunOutcome:
+        """Snapshot run IDs, dispatch, wait for the new run, and return results."""
+        existing_ids = self._get_existing_run_ids()
+        self.dispatch(ref, attempt_id, dry_run)
+        run = self.find_run(ref, existing_ids, timeout_s=dispatch_timeout)
         run = self.wait_for_completion(run["id"], timeout_s=run_timeout)
-        result_json = self.fetch_result_json(run["id"], attempt_id)
-        annotations = [] if result_json is not None else self.fetch_error_annotations(run["id"])
+        files = self.fetch_artefact_files(run["id"], attempt_id)
+        annotations = self.fetch_error_annotations(run["id"])
+
         return RunOutcome(
             run_id=run["id"],
             html_url=run["html_url"],
             conclusion=run["conclusion"],
-            result_json=result_json,
+            result_json=files.get("result.json") or None,
+            oidc_probe_json=files.get("oidc_probe.json") or None,
             error_annotations=annotations,
         )
