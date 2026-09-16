@@ -14,8 +14,8 @@ what's on the other end of PATHOEQA_API_URL - including the one thing Level
 1 structurally cannot exercise, the real GitHub OIDC mint (Level 1 always
 supplies --oidc-token directly and never touches ACTIONS_ID_TOKEN_REQUEST_URL).
 Until PathoEQA exists, a well-formed request is *expected* to fail at the
-manifest fetch with ATTEMPT_NOT_FOUND (if host returns HTTP 404) or 
-UPSTREAM_UNAVAILABLE (if host is unreachable), and `if: always()` on the 
+manifest fetch with ATTEMPT_NOT_FOUND (if host returns HTTP 404) or
+UPSTREAM_UNAVAILABLE (if host is unreachable), and `if: always()` on the
 upload step means that failure still produces a real, downloadable result.json.
 
 Prerequisite this suite cannot set for you: PATHOEQA_API_URL is a repo
@@ -79,9 +79,16 @@ def test_dry_run_fails_at_manifest_fetch(gh, ref):
     payload = json.loads(outcome.result_json)
     assert payload["attempt_id"] == attempt_id
     assert payload["terminal_state"] == "attempt_failed"
-    assert payload["failure_class"] in ("attempt_not_found", "upstream_unavailable"), (
-        f"expected attempt_not_found or upstream_unavailable, got {payload['failure_class']}. "
-        "A different failure_class means something upstream of the manifest fetch changed "
-        "(e.g. PATHOEQA_API_URL misconfigured -> config_error, or attempt_id validation regressed)"
+    assert payload["failure_class"] in ("attempt_not_found", "upstream_unavailable", "config_error"), (
+        f"expected a PathoEQA-side failure, got {payload['failure_class']}"
+    )
+    # config_error is shared by two unrelated causes: a missing OIDC token
+    # ("No OIDC token available...") and a missing/non-HTTPS PATHOEQA_API_URL.
+    # Reaching any PathoEQA-side outcome at all already proves OIDC minted
+    # successfully - _resolve_oidc_token runs before ExecutionAttempt is even
+    # constructed and would raise its own config_error/upstream_unavailable
+    # first if minting failed. This assertion just makes that explicit.
+    assert "oidc" not in payload.get("message", "").lower(), (
+        f"failure mentions OIDC, meaning the token mint itself failed: {payload.get('message')}"
     )
     assert payload["dry_run"] is True

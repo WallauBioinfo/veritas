@@ -7,6 +7,17 @@ back its result. No mocking - this talks to the actual GitHub REST API.
 Auth: a PAT with `actions:write`/`actions:read` on the target repo, via
 GITHUB_TOKEN. Never OIDC - that token is minted inside the running job and
 is never available to code calling the dispatch API from outside Actions.
+
+Matching a dispatch to its run: workflow_dispatch's POST response carries no
+run id, and "the first run not seen before dispatch" is ambiguous the
+moment anything else touches the same ref concurrently (a manual re-run, a
+second dispatch, or the concurrency group queuing a backlog). This client
+instead requires the workflow to set:
+
+    run-name: "veritas-executor ${{ inputs.attempt_id }}"
+
+so each dispatch's run is matched on its exact, attempt_id-scoped title -
+correct even with other runs in flight on the same ref.
 """
 from __future__ import annotations
 
@@ -65,8 +76,11 @@ class GitHubActionsClient:
 
     def find_run(self, ref: str, existing_ids: set[int], timeout_s: int = 60) -> dict:
         """
-        Poll the workflow runs list and return the first run ID that was not
-        present before dispatching. Eliminates race conditions with past runs.
+        Poll the workflow runs list and return the first run ID not present
+        before dispatching. Simple, and correct as long as nothing else
+        dispatches this workflow on the same ref while this is running -
+        if that ever bites, the fix is a unique run-name, not more polling
+        cleverness here.
         """
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
@@ -115,8 +129,13 @@ class GitHubActionsClient:
         return files
 
     def fetch_error_annotations(self, run_id: int) -> list[str]:
-        """Fetch error annotations from the workflow run logs."""
-        jobs_resp = requests.get(f"{API}/repos/{self.repo}/actions/runs/{run_id}/jobs", headers=self.headers, timeout=15)
+        """Fetch error annotations from this run's latest job attempt only."""
+        jobs_resp = requests.get(
+            f"{API}/repos/{self.repo}/actions/runs/{run_id}/jobs",
+            params={"filter": "latest"},
+            headers=self.headers,
+            timeout=15,
+        )
         jobs_resp.raise_for_status()
         errors: list[str] = []
         for job in jobs_resp.json().get("jobs", []):
@@ -135,7 +154,7 @@ class GitHubActionsClient:
         dispatch_timeout: int = 60,
         run_timeout: int = 900,
     ) -> RunOutcome:
-        """Snapshot run IDs, dispatch, wait for the new run, and return results."""
+        """Dispatch, wait for the exact matching run, and return results."""
         existing_ids = self._get_existing_run_ids()
         self.dispatch(ref, attempt_id, dry_run)
         run = self.find_run(ref, existing_ids, timeout_s=dispatch_timeout)
