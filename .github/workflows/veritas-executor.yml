@@ -120,7 +120,7 @@ jobs:
           if [[ "${DRY_RUN}" == "true" ]]; then ARGS+=(--dry-run); fi
           # The CLI mints the OIDC token itself from ACTIONS_ID_TOKEN_REQUEST_URL/TOKEN,
           # which GitHub injects here because this job has id-token: write.
-          python -m veritas_runner "${ARGS[@]}" | tee "${VERITAS_OUTPUT_DIR}/result.json"
+          python -m veritas.veritas_runner "${ARGS[@]}" | tee "${VERITAS_OUTPUT_DIR}/result.json"
           exit "${PIPESTATUS[0]}"
 
       - name: Upload attempt artefacts
