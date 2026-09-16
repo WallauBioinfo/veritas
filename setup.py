@@ -23,6 +23,8 @@ setup(
         "requests>=2.28.0",
         "pyyaml>=6.0",
         "PyGithub>=2.0.0",
+        "pydantic>=2.0.0",
+        "icontract",
     ],
     extras_require={
         "dev": [
