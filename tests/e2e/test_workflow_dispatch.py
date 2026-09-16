@@ -47,7 +47,7 @@ def test_malformed_attempt_id_fails_before_run_attempt(gh, ref):
 
     assert outcome.conclusion == "failure"
     assert outcome.result_json is None, "should fail before 'Run attempt', so no artefact should exist"
-    assert any("INPUT_MALFORMED" in line for line in outcome.error_annotations), outcome.error_annotations
+    assert any("INPUT_MALFORMED" in a for a in outcome.error_annotations), outcome.error_annotations
 
 
 def test_dry_run_fails_at_manifest_fetch(gh, ref):

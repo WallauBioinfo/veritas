@@ -22,7 +22,6 @@ correct even with other runs in flight on the same ref.
 from __future__ import annotations
 
 import io
-import re
 import time
 import zipfile
 from dataclasses import dataclass
@@ -129,7 +128,15 @@ class GitHubActionsClient:
         return files
 
     def fetch_error_annotations(self, run_id: int) -> list[str]:
-        """Fetch error annotations from this run's latest job attempt only."""
+        """
+        Real, triggered annotations only - via the Check Runs Annotations API,
+        not raw log text. Raw job logs include each step's full script source
+        verbatim in an expandable "Run ..." preview *before* execution, so a
+        step whose source merely contains `echo "::error ...` (inside an `if`
+        that never fires) would show up in a naive log-text regex regardless
+        of whether that branch actually ran. Annotations reflect only what
+        was genuinely printed as a workflow command during execution.
+        """
         jobs_resp = requests.get(
             f"{API}/repos/{self.repo}/actions/runs/{run_id}/jobs",
             params={"filter": "latest"},
@@ -139,11 +146,17 @@ class GitHubActionsClient:
         jobs_resp.raise_for_status()
         errors: list[str] = []
         for job in jobs_resp.json().get("jobs", []):
-            logs_resp = requests.get(
-                f"{API}/repos/{self.repo}/actions/jobs/{job['id']}/logs", headers=self.headers, timeout=15
+            # An Actions job ID is also its check-run ID.
+            ann_resp = requests.get(
+                f"{API}/repos/{self.repo}/check-runs/{job['id']}/annotations",
+                headers=self.headers,
+                timeout=15,
             )
-            if logs_resp.status_code == 200:
-                errors.extend(re.findall(r"::error[^\n]*", logs_resp.text))
+            if ann_resp.status_code != 200:
+                continue
+            for ann in ann_resp.json():
+                if ann.get("annotation_level") == "failure":
+                    errors.append(f"{ann.get('title', '')}: {ann.get('message', '')}")
         return errors
 
     def run(
