@@ -43,7 +43,7 @@ ROLE_FILES = {
     "truth_tbi": "SEARCH-8113.vcf.gz.tbi",
     "rtg_sdf": "rtg_sdf.tar.gz",
     "reference_fasta": "reference.fa",
-    "query_vcf": "SEARCH-8113.vcf.gz",  # self-comparison: truth == query -> clean green run
+    "query_vcf": "query_SEARCH-8113.vcf.gz",
     "primer_bed": "primers.bed",
 }
 

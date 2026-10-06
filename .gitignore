@@ -215,3 +215,4 @@ __marimo__/
 # mockup server
 pathoeqa-mock/certs/
 pathoeqa-mock/data/
+pathoeqa-mock/lines.txt
