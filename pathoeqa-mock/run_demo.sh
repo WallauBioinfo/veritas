@@ -12,6 +12,8 @@ case "${1:-good}" in
   *) echo "usage: $0 good|bad"; exit 2 ;;
 esac
 
+rm -rf "/tmp/veritas-demo/$ID/out/SEARCH-8113/output"
+
 python -m veritas_runner run-attempt \
   --attempt-id "$ID" \
   --api-url "${MOCK_PUBLIC_URL:-https://localhost:8443}" \
