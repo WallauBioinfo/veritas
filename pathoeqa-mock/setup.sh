@@ -13,7 +13,7 @@ for f in done format.log mainIndex nameIndex0 namedata0 namepointer0 progress \
   curl -fsSL "$RAW/rtg_sdf/$f" -o "data/rtg_sdf/$f"
 done
 
-openssl req -x509 -newkey rsa:2048 -nodes -days 7 \
+openssl req -x509 -newkey rsa:2048 -nodes -days 365 \
   -keyout certs/localhost.key -out certs/localhost.crt \
   -subj "/CN=localhost" -addext "subjectAltName=DNS:localhost,IP:127.0.0.1"
 

@@ -218,11 +218,19 @@ def main(argv: Optional[list[str]] = None) -> int:
         record = {
             "attempt_id": result.attempt_id,
             "terminal_state": result.terminal_state,
-            "failure_class": StatusClass.SUCCESS.value,
             "duration_ms": result.duration_ms,
             "veritas_version": result.veritas_version,
             "samples_total": len(result.samples),
             "samples_completed": sum(1 for s in result.samples if s.is_completed),
+            "samples": [
+                {
+                    "sample_run_id": s.sample_run_id,
+                    "terminal_state": s.terminal_state,
+                    "failure_class": None if s.is_completed else s.status.value,
+                    "duration_ms": s.duration_ms,
+                }
+                for s in result.samples
+            ],
             "dry_run": args.dry_run,
         }
         return _emit(record, result.exit_code)
