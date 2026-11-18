@@ -10,6 +10,7 @@ import zipfile
 from typing import Optional, ClassVar
 from pathlib import Path
 import requests
+import subprocess
 
 from .datamodels import ManifestFile
 from .exceptions import ErrorFactory, HttpSurface, VeritasRunnerError
@@ -60,6 +61,7 @@ class ArtefactClass:
     # TODO: implement correct range-based retry logic. Currently atomic.
     
     _ARCHIVE_SUFFIXES: ClassVar[tuple[str,...]] = (".tar.gz", ".tgz", ".tar", ".zip")
+    _TOOL_TIMEOUT_S: ClassVar[float] = 600.0
 
     DEFAULT_CONNECT_TIMEOUT_S: ClassVar[float] = 10.0
     DEFAULT_READ_TIMEOUT_S: ClassVar[float] = 60.0
@@ -400,6 +402,7 @@ class ArtefactClass:
     
     # ---------------------------------------------------------- rtg sdf prep
 
+    # TODO: rm legacy code after tests
     def prepare_rtg_sdf(
         self, 
         downloaded_path: str | Path, 
@@ -459,11 +462,179 @@ class ArtefactClass:
                 StatusClass.ARTEFACT_INVALID,
                 f"Extracted RTG SDF directory is missing 'mainIndex': {sdf_dir}",
             )
-        return sdf_dir ## TODO: refactor runner.py to take in sdf_dir as Path
+        return sdf_dir
 
-    
+        # ------------------------------------------------------ Truth files generated on-the-fly
+
+    def _run_tool(
+        self,
+        cmd: list[str],
+        what: str,
+        deadline: Optional[float],
+        fail: ErrorFactory,
+    ) -> None:
+        """Run an external tool to completion under the operational deadline.
+
+        Parameters
+        ----------
+        cmd : list of str
+            Command line to execute; ``cmd[0]`` must be on ``PATH``.
+        what : str
+            Short description of the step, used in error messages.
+        deadline : float or None
+            Monotonic time limit threshold.
+        fail : ErrorFactory
+            Bound error factory for contextual exception raising.
+
+        Raises
+        ------
+        VeritasRunnerError
+            If the deadline is already reached, the tool is missing, times out,
+            exits with a non-zero status, or cannot be executed.
+        """
+        timeout_s = self._TOOL_TIMEOUT_S
+        if deadline is not None:
+            timeout_s = min(timeout_s, deadline - time.monotonic())
+            if timeout_s <= 0:
+                raise fail(StatusClass.DEADLINE_EXCEEDED, f"Operational deadline reached before {what}.")
+
+        try:
+            subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s, check=True)
+        except FileNotFoundError as e:
+            raise fail(StatusClass.EXECUTOR_UNAVAILABLE, f"'{cmd[0]}' not found on host PATH.") from e
+        except subprocess.TimeoutExpired as e:
+            raise fail(StatusClass.PROCESSING_TIMEOUT, f"{what} exceeded {timeout_s:.0f}s.") from e
+        except subprocess.CalledProcessError as e:
+            detail = e.stderr.strip().splitlines()[-1] if e.stderr and e.stderr.strip() else f"exit code {e.returncode}"
+            raise fail(StatusClass.ARTEFACT_INVALID, f"{what} failed: {detail}") from e
+        except OSError as e:
+            raise fail(StatusClass.CONFIG_ERROR, f"Cannot execute {what}: {e}") from e
+
+    def build_rtg_sdf(
+        self,
+        reference_fasta: str | Path,
+        sdf_dir: str | Path,
+        deadline: Optional[float] = None,
+    ) -> Path:
+        """Build the RTG SDF that `--rtg-reference` requires from the reference FASTA.
+
+        Replaces any existing directory at `sdf_dir`, because ``rtg format``
+        refuses to write into one. Verifies presence of the `mainIndex`
+        descriptor file required by RTG tools.
+
+        Parameters
+        ----------
+        reference_fasta : str | Path
+            Path to the downloaded and verified reference FASTA.
+        sdf_dir : str | Path
+            Target directory for the generated SDF.
+        deadline : float or None, optional
+            Monotonic time limit threshold.
+
+        Returns
+        -------
+        Path
+            Verified absolute Path to the built RTG SDF directory.
+
+        Raises
+        ------
+        VeritasRunnerError
+            If the target directory cannot be prepared, ``rtg format`` fails or
+            times out, or the result is missing `mainIndex`.
+        """
+        fail = self._error.bind(prefix="rtg_sdf")
+        destination = Path(sdf_dir).resolve()
+
+        try:
+            if destination.exists():
+                shutil.rmtree(destination)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            raise fail(StatusClass.CONFIG_ERROR, f"Cannot prepare SDF directory: {e}") from e
+
+        self._run_tool(
+            ["rtg", "format", "-o", str(destination), str(reference_fasta)],
+            "rtg format",
+            deadline,
+            fail,
+        )
+
+        if not (destination / "mainIndex").is_file():
+            raise fail(
+                StatusClass.ARTEFACT_INVALID,
+                f"Built RTG SDF is missing 'mainIndex': {destination}",
+            )
+
+        logger.info("Built RTG SDF from reference_fasta (sha256=%s)", self._file_sha256(reference_fasta))
+        return destination
+
+    def bgzf_index_vcf(
+        self,
+        source_vcf: str | Path,
+        derived_vcf: str | Path,
+        deadline: Optional[float] = None,
+    ) -> Path:
+        """Write a sorted BGZF copy of a VCF together with its TBI index.
+
+        The downloaded original is left untouched so its manifest hash stays
+        verifiable. The original and derived SHA-256 digests are logged as
+        provenance.
+
+        Parameters
+        ----------
+        source_vcf : str | Path
+            Path to the downloaded and verified VCF (plain, gzip or BGZF).
+        derived_vcf : str | Path
+            Target path of the BGZF copy (`.vcf.gz`); the index is written
+            next to it as `<derived_vcf>.tbi`.
+        deadline : float or None, optional
+            Monotonic time limit threshold.
+
+        Returns
+        -------
+        Path
+            Absolute Path to the derived BGZF VCF, with its `.tbi` beside it.
+
+        Raises
+        ------
+        VeritasRunnerError
+            If the target directory cannot be created, ``bcftools`` fails or
+            times out, or the index file is not produced.
+        """
+        fail = self._error.bind(prefix="vcf_prep")
+        derived = Path(derived_vcf).resolve()
+
+        try:
+            derived.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            raise fail(StatusClass.CONFIG_ERROR, f"Cannot prepare derived directory: {e}") from e
+
+        self._run_tool(
+            ["bcftools", "sort", "-Oz", "-o", str(derived), str(source_vcf)],
+            "bcftools sort",
+            deadline,
+            fail,
+        )
+        self._run_tool(
+            ["bcftools", "index", "-t", "-f", str(derived)],
+            "bcftools index",
+            deadline,
+            fail,
+        )
+
+        if not Path(f"{derived}.tbi").is_file():
+            raise fail(StatusClass.ARTEFACT_INVALID, f"TBI index was not created for {derived.name}.")
+
+        logger.info(
+            "Prepared %s (original sha256=%s, derived sha256=%s)",
+            derived.name,
+            self._file_sha256(source_vcf),
+            self._file_sha256(derived),
+        )
+        return derived
+
     # -------------------------------------------------------- truth vcf index
-    
+    # TODO: rm legacy code after tests
     @staticmethod
     def enforce_truth_vcf_index(truth_vcf_path: str | Path, tbi_path: str | Path) -> None:
         """Place the truth VCF tabix index adjacent to the target VCF file.

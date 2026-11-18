@@ -90,33 +90,31 @@ class ExecutionAttempt:
         into a dedicated sample subdirectory. Inputs are fetched lazily at sample
         execution time, and artefacts are downloaded sequentially for each sample.
         Local caching, file existence checks, and deduplication are handled internally
-        by `ArtefactClass.download`. Also manages post-download preparation for RTG
-        SDF reference directories and VCF index verification.
+        by `ArtefactClass.download`. After download, builds the RTG SDF and the
+        BGZF/TBI VCF copies that Veritas requires (see `_derive_inputs`).
 
         Parameters
         ----------
         sample : SampleInput
             Manifest and metadata for the sample run to materialize.
-    
+
         Returns
         -------
         dict[str, Path]
-            Mapping of artefact roles (e.g., `'truth_vcf'`, `'query_fasta'`,
+            Mapping of artefact roles (e.g., `'truth_vcf'`, `'query_vcf'`,
             `'rtg_sdf'`) to their resolved local `Path` locations on disk.
 
         Raises
         ------
         VeritasRunnerError
-            If any artefact download fails after exhausting retries or if RTG SDF
-            preparation fails.
+            If any artefact download fails after exhausting retries or if the
+            derived inputs cannot be built.
         """
         artefact_handler = ArtefactClass(session=self.session, attempt_id=self.attempt_id)
 
         sample_dir = self.workdir / sample.sample_run_id
 
-        required_truth_roles = {"truth_vcf", "truth_tbi", "rtg_sdf"}
-        if sample.query_type == "fasta":
-            required_truth_roles.add("reference_fasta")
+        required_truth_roles = {"truth_vcf", "reference_fasta"}
 
         to_fetch: list[ManifestFile] = [f for f in sample.truth_bundle.files if f.role in required_truth_roles] + [sample.query_input]
 
@@ -138,16 +136,54 @@ class ExecutionAttempt:
             )
             paths[artefact.role] = fetched
 
-        if "rtg_sdf" in paths:
-            paths["rtg_sdf"] = artefact_handler.prepare_rtg_sdf(
-                paths["rtg_sdf"],
-                sample_dir / "rtg_sdf"
-            )
+        return self._derive_inputs(paths, sample_dir, artefact_handler)
 
-        if "truth_tbi" in paths:
-            artefact_handler.enforce_truth_vcf_index(paths["truth_vcf"], paths["truth_tbi"])
+    def _derive_inputs(
+        self,
+        paths: dict[str, Path],
+        sample_dir: Path,
+        artefact_handler: ArtefactClass,
+    ) -> dict[str, Path]:
+        """
+        Build the derived inputs Veritas requires from the downloaded originals.
 
-        return paths
+        Builds the RTG SDF from `reference_fasta` and writes a sorted BGZF copy,
+        with a TBI index, of each VCF present. The downloaded originals are left
+        untouched; the returned mapping points `truth_vcf` and `query_vcf` at the
+        derived copies.
+
+        Parameters
+        ----------
+        paths : dict[str, Path]
+            Downloaded artefacts by role; must contain `reference_fasta`.
+        sample_dir : Path
+            Sample workspace; derived files are written under `sample_dir / "derived"`.
+        artefact_handler : ArtefactClass
+            Handler providing `build_rtg_sdf` and `bgzf_index_vcf`.
+
+        Returns
+        -------
+        dict[str, Path]
+            New mapping with `rtg_sdf` added and `truth_vcf` / `query_vcf`
+            replaced by their derived, indexed copies.
+
+        Raises
+        ------
+        VeritasRunnerError
+            If the SDF or a derived VCF cannot be built.
+        """
+        derived_dir = sample_dir / "derived"
+        derived = dict(paths)
+
+        derived["rtg_sdf"] = artefact_handler.build_rtg_sdf(
+            paths["reference_fasta"], derived_dir / "rtg_sdf", deadline=self.deadline
+        )
+        for role in ("truth_vcf", "query_vcf"):
+            if role in paths:
+                derived[role] = artefact_handler.bgzf_index_vcf(
+                    paths[role], derived_dir / f"{role}.vcf.gz", deadline=self.deadline
+                )
+        return derived
 
     def _get_dir_size_mb(self, path: Path) -> float:
         """
