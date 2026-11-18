@@ -36,8 +36,8 @@ class TruthBundle(BaseModel):
 
     @model_validator(mode="after")
     def check_required_roles_present(self) -> Self: #TODO require Python 3.11+
-        found_roles = {f.role for f in self.files}
-        required_truth_roles = {"truth_vcf", "truth_tbi", "rtg_sdf"} # TODO: low_cov.bed as requirement?
+        found_roles = {f.role for f in self.files}  #TODO: remove legacy structure: TBI and SDF not required any longer
+        required_truth_roles = {"truth_vcf", "reference_fasta"}
         missing_roles = required_truth_roles - found_roles
         
         if missing_roles:
@@ -89,15 +89,13 @@ class SampleInput(BaseModel):
     region_annotations: Optional[RegionAnnotations] = None
 
     @model_validator(mode="after")
-    def check_input_role_and_fasta(self) -> Self:
+    def check_input_role(self) -> Self:
         expected_role = f"query_{self.query_type}"
         if self.query_input.role != expected_role:
             raise ValueError(
                 f"query_type is '{self.query_type}' but query_input.role is "
                 f"'{self.query_input.role}' (expected '{expected_role}')"
             )
-        if self.query_type == "fasta" and "reference_fasta" not in self.truth_bundle.files_by_role:
-            raise ValueError("query_type 'fasta' requires 'reference_fasta' in truth_bundle.files")
         return self
 
     @property

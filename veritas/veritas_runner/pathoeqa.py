@@ -23,7 +23,7 @@ MAX_MANIFEST_BYTES = int(os.environ.get("VERITAS_MANIFEST_MAX_BYTES", 256 * 1024
 MAX_CALLBACK_BYTES = int(os.environ.get("VERITAS_CALLBACK_MAX_BYTES", 1024 * 1024))
 CONNECT_TIMEOUT_S = float(os.environ.get("VERITAS_HTTP_CONNECT_TIMEOUT", 10))
 READ_TIMEOUT_S = float(os.environ.get("VERITAS_HTTP_READ_TIMEOUT", 15))
-SUPPORTED_SCHEMA_MAJOR = os.environ.get("VERITAS_SUPPORTED_SCHEMA_MAJOR", "1")
+SUPPORTED_MANIFEST_SCHEMA_VERSIONS = frozenset({"2.0"})
 
 
 class PathoEQAClient:
@@ -82,12 +82,12 @@ class PathoEQAClient:
     # ---------------------------------------------------------------- manifest
 
     @icontract.ensure(
-        lambda result: result.schema_version.split(".", 1)[0] == SUPPORTED_SCHEMA_MAJOR,
+        lambda result: result.schema_version in SUPPORTED_MANIFEST_SCHEMA_VERSIONS,
         "Manifest schema version is unsupported",
         error=lambda result, self: self._error(
             StatusClass.MANIFEST_INVALID,
             f"Unsupported schema_version '{result.schema_version}'; "
-            f"this runner supports major version {SUPPORTED_SCHEMA_MAJOR}.",
+            f"this runner supports: {sorted(SUPPORTED_MANIFEST_SCHEMA_VERSIONS)}.",
         ),
     )
 

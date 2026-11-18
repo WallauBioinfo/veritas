@@ -29,7 +29,7 @@ class AttemptReporter:
         environment variable or "1.0".
     """
 
-    CALLBACK_SCHEMA_VERSION = str(os.environ.get("VERITAS_CALLBACK_SCHEMA_VERSION", "1.0"))
+    CALLBACK_SCHEMA_VERSION = "1.0"
 
     def __init__(
         self,
