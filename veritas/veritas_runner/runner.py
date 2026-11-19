@@ -346,15 +346,65 @@ class ExecutionAttempt:
             payload["failure_class"] = outcome.status.spec_failure_class
             payload["detail"] = outcome.message[:2000]
 
-        self.reporter.emit(
-            event_type = outcome.terminal_state, 
+        event_id = self.reporter.emit(
+            event_type=outcome.terminal_state,
             sample_run_id=sample_run_id,
             payload=payload,
             deadline=self.deadline,
             best_effort=True,
         )
-        return outcome
 
+        if outcome.is_completed and not self.dry_run:
+            if event_id is not None:
+                self._deliver_result(sample, event_id, output_dir / "metrics.tsv")
+            else:
+                logger.warning(
+                    "Result delivery skipped for sample %s: its terminal callback was not delivered.",
+                    sample_run_id,
+                )
+        return outcome
+        
+    def _deliver_result(
+        self,
+        sample: SampleInput,
+        event_id: str,
+        metrics_file: Path,
+    ) -> None:
+        """
+        Deliver a completed sample's ``metrics.tsv`` to PathoEQA.
+
+        Runs after the sample's terminal callback was accepted. A delivery failure
+        is logged but does not change the sample outcome, because that callback has
+        already been sent.
+
+        Parameters
+        ----------
+        sample : SampleInput
+            Manifest entry of the delivered sample.
+        event_id : str
+            `event_id` of the sample's accepted terminal callback.
+        metrics_file : Path
+            Path to the sample's ``metrics.tsv``.
+        """
+        try:
+            metrics = metrics_file.read_bytes()
+        except OSError as e:
+            logger.error("Result delivery skipped for sample %s: cannot read metrics.tsv (%s).", sample.sample_run_id, e)
+            return
+
+        self.reporter.deliver_result(
+            sample.sample_run_id,
+            metrics,
+            event_id=event_id,
+            input_type=sample.query_type,
+            input_sha256=sample.query_input.sha256,
+            truth_manifest_hash=sample.truth_bundle.id,
+            executor_sha=os.environ.get("GITHUB_SHA", "").lower(),
+            deadline=self.deadline,
+            best_effort=True,
+        )
+
+    
     def run_attempt(
         self,
         fail: ErrorFactory
@@ -483,7 +533,6 @@ class ExecutionAttempt:
             self.client.close()
 
 
-
 def _run_veritas(
         paths: dict[str, Path], 
         output_dir: str | Path, 
@@ -572,6 +621,7 @@ def _run_veritas(
             StatusClass.METRICS_MISSING,
             "Veritas exited with status 0 but failed to generate non-empty metrics.tsv.",
         )
+    logger.info("metrics.tsv generated: %s (%d bytes)", metrics_file, metrics_file.stat().st_size)
 
 
 def _veritas_version() -> str:

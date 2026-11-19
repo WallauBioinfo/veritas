@@ -12,6 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 from typing import ClassVar, Optional
+from pydantic import ValidationError
 
 from .status import StatusClass
 from .datamodels import CallbackPayload
@@ -285,6 +286,48 @@ class ErrorFactory:
 
         where = f" during {context}" if context else ""
         raise self(failure_class, f"HTTP {status_code}{where} ({surface.value}).")
+
+    def from_validation_error(
+        self,
+        exc: ValidationError,
+        failure_class: StatusClass,
+        *,
+        context: str = "",
+        max_errors: int = 10,
+    ) -> VeritasRunnerError:
+        """
+        Construct a VeritasRunnerError from a pydantic ValidationError.
+
+        Lists each failing field and its validation message, but never the input
+        values, so payload content does not leak into logs or callbacks.
+
+        Parameters
+        ----------
+        exc : ValidationError
+            The validation failure raised while building or parsing a model.
+        failure_class : StatusClass
+            Domain taxonomy classification for the failure.
+        context : str, optional
+            Keyword-only description of what was being validated (e.g., "Manifest").
+        max_errors : int, optional
+            Keyword-only cap on how many errors are listed (default: 10).
+
+        Returns
+        -------
+        VeritasRunnerError
+            An error instance pre-bound with the factory's context and prefix.
+        """
+        errors = exc.errors()
+        details = "; ".join(
+            f"{'.'.join(map(str, err['loc'])) or '<root>'}: {err['msg']}"
+            for err in errors[:max_errors]
+        )
+        more = f" (+{len(errors) - max_errors} more)" if len(errors) > max_errors else ""
+        where = f"{context} " if context else ""
+        return self(
+            failure_class,
+            f"{where}failed validation ({len(errors)} error(s)): {details}{more}.",
+        )
 
     def bind(
         self,

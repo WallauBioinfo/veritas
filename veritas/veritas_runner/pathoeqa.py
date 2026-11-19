@@ -13,7 +13,7 @@ import icontract
 import requests
 from pydantic import ValidationError
 
-from .datamodels import CallbackEnvelope, Manifest
+from .datamodels import CallbackEnvelope, Manifest, ResultMetadata
 from .exceptions import VeritasRunnerError, ErrorFactory, HttpSurface
 from .status import StatusClass
 
@@ -245,6 +245,96 @@ class PathoEQAClient:
             HttpSurface.CALLBACK,
             context="status callback"
         )
+
+    # -------------------------------------------------- send results
+    def send_result(
+        self,
+        sample_run_id: str,
+        metrics: bytes,
+        metadata: ResultMetadata,
+    ) -> None:
+        """
+        POST /attempts/{attempt_id}/samples/{sample_run_id}/results - Deliver one sample's metrics TSV.
+
+        Sends a two-part multipart request (a ``metadata`` JSON field and a ``metrics``
+        file). Executes a single HTTP attempt without internal retries; the caller wraps
+        it in the retry helper. `metadata.event_id` is also the `Idempotency-Key`, so a
+        resend after a lost response is safe.
+
+        Parameters
+        ----------
+        sample_run_id : str
+            Sample run the metrics belong to.
+        metrics : bytes
+            Exact bytes of the sample's ``metrics.tsv``; PathoEQA hashes them, so
+            they must not be re-encoded.
+        metadata : ResultMetadata
+            Validated delivery metadata built from `metrics`.
+
+        Raises
+        ------
+        VeritasRunnerError
+            On transport failure, on an HTTP error response, or if the response
+            does not confirm the delivered metrics.
+        """
+        url = f"{self.api_url}/attempts/{self.attempt_id}/samples/{sample_run_id}/results"
+        logger.info(
+            "Result delivery attempt_id=%s sample_run_id=%s event_id=%s",
+            self.attempt_id,
+            sample_run_id,
+            metadata.event_id,
+        )
+
+        try:
+            response = self.session.post(
+                url,
+                data={"metadata": metadata.model_dump_json()},
+                files={"metrics": ("metrics.tsv", metrics, "text/tab-separated-values")},
+                headers={"Idempotency-Key": metadata.event_id},
+                timeout=(CONNECT_TIMEOUT_S, READ_TIMEOUT_S),
+            )
+        except (
+            requests.exceptions.SSLError,
+            requests.exceptions.InvalidURL,
+            requests.exceptions.MissingSchema,
+            requests.exceptions.InvalidHeader,
+        ) as e:
+            raise self._error(
+                StatusClass.CALLBACK_INVALID,
+                f"Invalid result delivery configuration or SSL failure: {type(e).__name__}",
+            ) from e
+        except (
+            requests.exceptions.Timeout,
+            requests.exceptions.ConnectionError,
+            requests.exceptions.ChunkedEncodingError,
+        ) as e:
+            raise self._error(
+                StatusClass.CALLBACK_FAILED,
+                f"Result delivery network transport failure: {type(e).__name__}",
+            ) from e
+        except requests.exceptions.RequestException as e:
+            raise self._error(
+                StatusClass.CALLBACK_INVALID,
+                f"Result delivery request failed: {type(e).__name__}",
+            ) from e
+
+        self._error.raise_for_http(
+            response.status_code,
+            HttpSurface.CALLBACK,
+            context="result delivery",
+        )
+
+        try:
+            body = response.json()
+        except ValueError as e:
+            raise self._error(StatusClass.CALLBACK_INVALID, "Result delivery returned a non-JSON body.") from e
+        if body.get("status") != "applied" or body.get("sha256") != metadata.sha256:
+            raise self._error(
+                StatusClass.CALLBACK_INVALID,
+                "Result delivery response did not confirm the delivered metrics.",
+            )
+    
+    # -------------------------------------------------close session
 
     def close(self) -> None:
         """Closes the underlying requests HTTP session."""

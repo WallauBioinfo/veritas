@@ -1,7 +1,9 @@
 from typing import List, Optional, Self, Literal, Dict
-from pydantic import BaseModel, Field, model_validator, field_validator
+from pydantic import BaseModel, Field, model_validator, field_validator, ConfigDict
 from dataclasses import dataclass, field
 from .status import StatusClass
+import hashlib
+import uuid
 
 class ManifestFile(BaseModel):
     role: str
@@ -24,7 +26,7 @@ class ManifestFile(BaseModel):
     @classmethod
     def check_https(cls, v: str) -> str:
         if not v.startswith("https://"):
-            raise ValueError(f"url must use HTTPS, got: {v!r}")
+            raise ValueError(f"url must use HTTPS")
         return v
 
 
@@ -137,7 +139,83 @@ class Manifest(BaseModel):
     
     #TODO: def validate_compatibility: check SUPPORTED_MANIFEST_VERSIONS, SUPPORTED_POLICY_VERSIONS, SUPPORTED_TRUTH_PACKAGE_VERSIONS
 
-    
+class ResultMetadata(BaseModel):
+    """Metadata part of a per-sample result delivery (PathoEQA result contract v1.0).
+
+    Mirrors the exact key set PathoEQA accepts; unknown keys are rejected.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal["1.0"] = "1.0"
+    event_id: str
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    byte_size: int = Field(ge=1)
+    input_type: Literal["fasta", "vcf"]
+    input_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    truth_manifest_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    executor_sha: str = Field(pattern=r"^[0-9a-f]{40}$")
+    execution_mode: Literal["real"] = "real"
+
+    @field_validator("event_id")
+    @classmethod
+    def check_event_id_is_uuid(cls, v: str) -> str:
+        try:
+            canonical = str(uuid.UUID(v))
+        except ValueError:
+            raise ValueError(f"event_id is not a valid UUID: {v!r}") from None
+        if canonical != v:
+            raise ValueError(f"event_id must be a canonical lowercase UUID, got: {v!r}")
+        return v
+
+    @classmethod
+    def from_bytes(
+        cls,
+        metrics: bytes,
+        *,
+        event_id: str,
+        input_type: str,
+        input_sha256: str,
+        truth_manifest_hash: str,
+        executor_sha: str,
+    ) -> Self:
+        """Build the metadata for a TSV, deriving `sha256` and `byte_size` from its bytes.
+
+        Parameters
+        ----------
+        metrics : bytes
+            Exact bytes of the sample's ``metrics.tsv``.
+        event_id : str
+            `event_id` of the sample's accepted terminal callback.
+        input_type : str
+            ``"fasta"`` or ``"vcf"``.
+        input_sha256 : str
+            SHA-256 of the original query input, as listed in the manifest.
+        truth_manifest_hash : str
+            Hash identifying the truth manifest of this evaluation.
+        executor_sha : str
+            Commit SHA of the running workflow.
+
+        Returns
+        -------
+        ResultMetadata
+            Validated metadata, ready to serialize.
+
+        Raises
+        ------
+        pydantic.ValidationError
+            If `metrics` is empty or any field violates the delivery contract.
+        """
+        return cls(
+            sha256=hashlib.sha256(metrics).hexdigest(),
+            byte_size=len(metrics),
+            event_id=event_id,
+            input_type=input_type,
+            input_sha256=input_sha256,
+            truth_manifest_hash=truth_manifest_hash,
+            executor_sha=executor_sha,
+        )
+
 class CallbackEnvelope(BaseModel):
     schema_version: str
     event_id: str
