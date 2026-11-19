@@ -283,18 +283,17 @@ class ExecutionAttempt:
             undefined_metrics = _scan_metrics_for_undefined(output_dir / "metrics.tsv")
 
             if undefined_metrics:
-                status = StatusClass.NOT_EVALUABLE
+                # TODO: use proper status StatusClass once zero-denominator handling is finalized
                 state = "sample_not_evaluable"
                 detail = "; ".join(
                     f"{m['variant_type']}/{m['metric']}" for m in undefined_metrics
                 )
                 message = f"Undefined due to genuine zero-denominator: {detail}."
             elif warnings_found:
-                status = StatusClass.SUCCESS  # TODO: needs its own StatusClass
+                # TODO: needs its own StatusClass
                 state = "sample_completed_with_warnings"
                 message = f"Sample evaluated with warnings: {'; '.join(warnings_found)}"
             else:
-                status = StatusClass.SUCCESS
                 state = "sample_completed"
                 message = ""
 
@@ -404,7 +403,6 @@ class ExecutionAttempt:
             best_effort=True,
         )
 
-    
     def run_attempt(
         self,
         fail: ErrorFactory
