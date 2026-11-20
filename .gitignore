@@ -216,3 +216,8 @@ __marimo__/
 pathoeqa-mock/certs/
 pathoeqa-mock/data/
 pathoeqa-mock/lines.txt
+
+
+#tests (legacy)
+tests/veritas_integration_local/old.zip
+replay_out

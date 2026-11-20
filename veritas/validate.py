@@ -495,7 +495,7 @@ def calc_metrics(
 
     return {
         "all": build_results(counts_all),
-        "counts_primer": counts_primer if has_primer_bed else None,
+        "counts_primer": build_results(counts_primer) if has_primer_bed else None,
         "counts_mask": counts_mask if has_mask_bed else None,
         "counts_low_cov_truth": counts_low_cov_truth if has_low_cov_truth_bed else None,
         "counts_low_cov_query": counts_low_cov_query if has_low_cov_query_bed else None,

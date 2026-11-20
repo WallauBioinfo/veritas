@@ -1,5 +1,5 @@
 """
-tests/veritas_integration/test_integration_local.py
+tests/veritas_integration_local/test_integration_local.py
 
 Level 1: local integration tests - the fast feedback loop.
 
@@ -76,7 +76,7 @@ def test_every_callback_carries_a_unique_idempotency_key(server, manifest_factor
     assert len(set(keys)) == len(keys)
 
 
-def test_artefacts_land_on_role_derived_paths_and_sdf_is_unpacked(
+def test_originals_are_kept_and_derived_inputs_are_built(
     server, manifest_factory, fake_veritas, tmp_path
 ):
     attempt_id = _attempt_id()
@@ -86,13 +86,16 @@ def test_artefacts_land_on_role_derived_paths_and_sdf_is_unpacked(
     _run(server, workdir, attempt_id)
 
     sample_dir = workdir / "sr-001"
-    assert sample_dir.is_dir()
-
-    all_paths = list(sample_dir.rglob("*"))
-    assert len(all_paths) > 0, "sample directory should contain downloaded artefacts"
-
-    sdf_dirs = [p for p in all_paths if p.is_dir() and "sdf" in p.name.lower()]
-    assert len(sdf_dirs) > 0, "RTG SDF must be unpacked into a directory"
+    # Only the four originals are downloaded; TBI and SDF are never requested.
+    assert sorted(server.artefact_requests) == ["primers.bed", "query.vcf.gz", "reference.fa", "truth.vcf.gz"]
+    for original in ("truth_vcf_*.vcf.gz", "query_vcf_*.vcf.gz", "reference_fasta_*.fa", "primer_bed_*.bed"):
+        assert list(sample_dir.glob(original)), f"original {original} must be kept untouched"
+    # TBI and SDF are built by the runner, next to each other under derived/.
+    derived = sample_dir / "derived"
+    assert (derived / "rtg_sdf" / "mainIndex").is_file()
+    for role in ("truth_vcf", "query_vcf"):
+        assert (derived / f"{role}.vcf.gz").is_file()
+        assert (derived / f"{role}.vcf.gz.tbi").is_file()
     assert not list(workdir.rglob("*.part")), "no partial files may survive"
 
 
@@ -109,6 +112,7 @@ def test_dry_run_downloads_but_never_invokes_veritas(server, manifest_factory, f
     assert sample_dir.is_dir()
     assert any(p.is_file() for p in sample_dir.rglob("*")), "artefacts should be downloaded during dry_run"
     assert not (sample_dir / "output" / "metrics.tsv").exists(), "veritas should not have executed"
+    assert server.results == [], "a dry run must not deliver results"
 
 
 # --------------------------------------------------------- control-plane faults
@@ -256,21 +260,20 @@ def test_transient_artefact_5xx_is_retried(server, manifest_factory, fake_verita
     assert server.artefact_requests["query.vcf.gz"] == 2
 
 
-def test_unusable_sdf_archive_is_artefact_invalid(server, manifest_factory, fake_veritas, tmp_path):
+def test_unreadable_vcf_is_artefact_invalid(server, manifest_factory, fake_veritas, tmp_path):
     attempt_id = _attempt_id()
-    broken = b"this is not a gzip tarball"
-    server.add_artefact("broken_sdf.tar.gz", broken)
+    broken = b"this is not a gzip VCF"
+    server.add_artefact("broken.vcf.gz", broken)
     manifest = manifest_factory(attempt_id, samples=1)
-    for f in manifest["samples"][0]["truth_bundle"]["files"]:
-        if f["role"] == "rtg_sdf":
-            f["url"] = server.artefact_url("broken_sdf.tar.gz")
-            f["sha256"] = hashlib.sha256(broken).hexdigest()
-            f["size"] = len(broken)
+    manifest["samples"][0]["query_input"].update(
+        url=server.artefact_url("broken.vcf.gz"), sha256=hashlib.sha256(broken).hexdigest(), size=len(broken)
+    )
     server.manifest = manifest
 
     result = _run(server, tmp_path / "wd", attempt_id)
 
     assert result.samples[0].status is StatusClass.ARTEFACT_INVALID
+    assert server.results == [], "a failed sample delivers no result"
 
 
 # ------------------------------------------------------------- execution faults
@@ -350,3 +353,93 @@ def test_terminal_callback_failure_is_loud(server, manifest_factory, fake_verita
         _run(server, tmp_path / "wd", attempt_id)
 
     assert excinfo.value.failure_class is StatusClass.CALLBACK_FAILED
+
+
+# ------------------------------------------------------------ result delivery (D-01)
+
+
+def test_completed_sample_delivers_its_metrics_tsv(server, manifest_factory, fake_veritas, tmp_path):
+    attempt_id = _attempt_id()
+    server.manifest = manifest_factory(attempt_id, samples=2)
+
+    result = _run(server, tmp_path / "wd", attempt_id)
+
+    assert result.terminal_state == "attempt_completed"
+    assert [r["sample_run_id"] for r in server.results] == ["sr-001", "sr-002"]
+    for record in server.results:
+        assert record["status"] == 200 and record["rejection"] is None
+        meta = record["metadata"]
+        assert record["authorization"] and record["idempotency_key"] == meta["event_id"]
+        assert meta["sha256"] == hashlib.sha256(record["tsv"]).hexdigest()
+        assert meta["input_type"] == "vcf" and meta["execution_mode"] == "real"
+        assert meta["executor_sha"] == "a" * 40
+    # Each delivery quotes the event_id of that sample's own terminal callback.
+    terminal_ids = {c["envelope"]["sample_run_id"]: c["envelope"]["event_id"]
+                    for c in server.callbacks if c["envelope"]["event_type"] == "sample_completed"}
+    assert {r["sample_run_id"]: r["metadata"]["event_id"] for r in server.results} == terminal_ids
+
+
+def test_delivery_carries_the_original_query_hash_not_the_derived_one(
+    server, manifest_factory, fake_veritas, tmp_path
+):
+    attempt_id = _attempt_id()
+    manifest = manifest_factory(attempt_id, samples=1)
+    server.manifest = manifest
+
+    _run(server, tmp_path / "wd", attempt_id)
+
+    meta = server.results[0]["metadata"]
+    assert meta["input_sha256"] == manifest["samples"][0]["query_input"]["sha256"]
+    assert meta["truth_manifest_hash"] == manifest["samples"][0]["truth_bundle"]["id"]
+
+
+def test_primer_rows_without_ratios_are_rejected_by_pathoeqa(
+    server, manifest_factory, fake_veritas, tmp_path, monkeypatch
+):
+    """Regression for the staging 422: Veritas wrote empty ratios on PRIMER BED rows."""
+    attempt_id = _attempt_id()
+    server.manifest = manifest_factory(attempt_id, samples=1)
+    monkeypatch.setenv("VERITAS_FAKE_MODE", "legacy_tsv")
+
+    result = _run(server, tmp_path / "wd", attempt_id)
+
+    record = server.results[0]
+    assert record["status"] == 422
+    assert record["rejection"].code == "metric_required"
+    assert record["rejection"].location == {"column": "Precision", "row": 4, "category": "SNV", "region": "PRIMER BED"}
+    # The sample callback was already accepted, so the attempt itself still completes.
+    assert result.terminal_state == "attempt_completed"
+
+
+def test_failed_sample_delivers_nothing(server, manifest_factory, fake_veritas, tmp_path, monkeypatch):
+    attempt_id = _attempt_id()
+    server.manifest = manifest_factory(attempt_id, samples=1)
+    monkeypatch.setenv("VERITAS_FAKE_MODE", "crash")
+
+    _run(server, tmp_path / "wd", attempt_id)
+
+    assert server.results == []
+
+
+def test_transient_result_5xx_is_retried(server, manifest_factory, fake_veritas, tmp_path):
+    attempt_id = _attempt_id()
+    server.manifest = manifest_factory(attempt_id, samples=1)
+    server.result_status = [503]
+
+    _run(server, tmp_path / "wd", attempt_id)
+
+    assert [r["status"] for r in server.results] == [503, 200]
+    assert server.results[0]["idempotency_key"] == server.results[1]["idempotency_key"]
+
+
+def test_result_is_not_delivered_when_the_terminal_callback_was_dropped(
+    server, manifest_factory, fake_veritas, tmp_path
+):
+    attempt_id = _attempt_id()
+    server.manifest = manifest_factory(attempt_id, samples=1)
+    # attempt_started (ok), sample_started (ok), then the sample's terminal callback fails 3 times
+    server.callback_status = [202, 202, 500, 500, 500]
+
+    _run(server, tmp_path / "wd", attempt_id)
+
+    assert server.results == []

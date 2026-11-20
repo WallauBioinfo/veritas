@@ -14,6 +14,8 @@ fixture exports REQUESTS_CA_BUNDLE so `requests` trusts exactly that cert.
 Endpoints
     GET  /attempts/{attempt_id}/manifest   -> manifest JSON
     POST /callbacks                        -> 202, envelope recorded
+    POST /attempts/{aid}/samples/{sid}/results -> per-sample TSV delivery (multipart),
+                                              validated with PathoEQA's own TSV parser
     GET  /artefacts/{name}                 -> raw artefact bytes
 
 Fault injection (all optional, all per-instance):
@@ -21,6 +23,7 @@ Fault injection (all optional, all per-instance):
                               falling back to 200 once exhausted
     server.artefact_status  : dict[name, list[int]]  same, per artefact
     server.callback_status  : list[int]
+    server.result_status    : list[int]  status codes for result deliveries
     server.corrupt          : set[name]  serve one flipped byte (checksum test)
     server.truncate         : set[name]  serve half the bytes (size test)
     server.slow_artefacts   : dict[name, float]  seconds to stall mid-stream
@@ -28,14 +31,20 @@ Fault injection (all optional, all per-instance):
 
 from __future__ import annotations
 
+import hashlib
 import json
+import re
 import subprocess
 import ssl
 import threading
 import time
+from email import policy
+from email.parser import BytesParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Dict, List, Optional, Set
+
+from tests.contract.metrics_contract import evaluate
 
 
 # --------------------------------------------------------------------- TLS
@@ -137,7 +146,11 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):  # noqa: N802
         srv = self.srv
-        if self.path.split("?")[0] != "/callbacks":
+        path = self.path.split("?")[0]
+        match = re.fullmatch(r"/attempts/([^/]+)/samples/([^/]+)/results", path)
+        if match:
+            return self._handle_result(*match.groups())
+        if path != "/callbacks":
             return self._send(404, b'{"detail":"not found"}')
 
         length = int(self.headers.get("Content-Length") or 0)
@@ -157,6 +170,60 @@ class _Handler(BaseHTTPRequestHandler):
         status = self._next_status(srv.callback_status)
         return self._send(status if status != 200 else 202, b'{"ok":true}')
 
+    _RESULT_KEYS = frozenset({"schema_version", "event_id", "sha256", "byte_size", "input_type",
+                              "input_sha256", "truth_manifest_hash", "executor_sha", "execution_mode"})
+    _EVIDENCE_EVENTS = frozenset({"sample_completed", "sample_completed_with_warnings", "sample_not_evaluable"})
+
+    def _handle_result(self, attempt_id: str, sample_run_id: str):
+        """Mimic PathoEQA's result ingress: shape, callback correlation, then the TSV contract."""
+        srv = self.srv
+        raw = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        record = {"attempt_id": attempt_id, "sample_run_id": sample_run_id,
+                  "idempotency_key": self.headers.get("Idempotency-Key"),
+                  "authorization": bool(self.headers.get("Authorization")),
+                  "metadata": None, "tsv": None, "rejection": None, "status": None}
+        srv.results.append(record)
+
+        def reply(status, payload):
+            record["status"] = status
+            return self._send(status, json.dumps(payload).encode())
+
+        injected = self._next_status(srv.result_status)
+        if injected != 200:
+            return reply(injected, {"error": "injected"})
+
+        message = BytesParser(policy=policy.HTTP).parsebytes(
+            b"Content-Type: " + self.headers["Content-Type"].encode() + b"\r\n\r\n" + raw)
+        parts = {p.get_param("name", header="content-disposition"): p.get_payload(decode=True)
+                 for p in message.iter_parts()}
+        if set(parts) != {"metadata", "metrics"}:
+            return reply(400, {"error": "invalid_result_request"})
+        try:
+            metadata = json.loads(parts["metadata"])
+        except ValueError:
+            return reply(400, {"error": "invalid_result_request"})
+        record.update(metadata=metadata, tsv=parts["metrics"])
+        if (not isinstance(metadata, dict) or not self._RESULT_KEYS <= metadata.keys()
+                or metadata.keys() - self._RESULT_KEYS - {"veritas_version"}
+                or record["idempotency_key"] != metadata["event_id"]):
+            return reply(400, {"error": "invalid_result_request"})
+
+        event = next((c["envelope"] for c in srv.callbacks
+                      if c["envelope"]["event_id"] == metadata["event_id"]), None)
+        if (event is None or event["event_type"] not in self._EVIDENCE_EVENTS
+                or event.get("sample_run_id") != sample_run_id):
+            return reply(409, {"error": "callback_not_ready"})
+
+        tsv = parts["metrics"]
+        if hashlib.sha256(tsv).hexdigest() != metadata["sha256"] or len(tsv) != metadata["byte_size"]:
+            return reply(422, {"error": "invalid_result_evidence"})
+        _, diagnostic = evaluate(tsv)
+        if diagnostic is not None:
+            record["rejection"] = diagnostic
+            return reply(422, {"error": "invalid_result_evidence"})
+        return reply(200, {"schema_version": "1.0", "status": "applied", "attempt_id": attempt_id,
+                           "sample_run_id": sample_run_id, "sha256": metadata["sha256"]})
+
 
 # ------------------------------------------------------------------- server
 
@@ -170,6 +237,7 @@ class MockPathoEQA:
 
         # observations
         self.callbacks: List[dict] = []
+        self.results: List[dict] = []
         self.manifest_requests = 0
         self.artefact_requests: Dict[str, int] = {}
 
@@ -177,6 +245,7 @@ class MockPathoEQA:
         self.manifest_status: List[int] = []
         self.artefact_status: Dict[str, List[int]] = {}
         self.callback_status: List[int] = []
+        self.result_status: List[int] = []
         self.corrupt: Set[str] = set()
         self.truncate: Set[str] = set()
         self.slow_artefacts: Dict[str, float] = {}

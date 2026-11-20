@@ -1,33 +1,54 @@
 """
 tests/conftest.py
 
-Shared fixtures for the local integration suite.
+Shared fixtures for the local integration suite (contract: manifest schema 2.0).
 
 The suite exercises the real code path end to end:
     python-level run_attempt()
         -> real requests.Session over TLS
-        -> mock PathoEQA (manifest + callbacks)
+        -> mock PathoEQA (manifest, callbacks, per-sample result delivery)
         -> mock artefact storage (real streaming + real SHA-256)
-        -> a fake `veritas` executable on PATH
+        -> fake `veritas`, `rtg` and `bcftools` executables on PATH
 
-Only two things are faked, and both are external systems we do not own:
-PathoEQA and the Veritas scientific binary. Everything in veritas_runner runs
-for real.
+Only external systems we do not own are faked: PathoEQA and the scientific /
+genomics binaries. Everything in veritas_runner runs for real. The result
+delivery is validated with PathoEQA's own metrics parser (tests/contract).
 """
 
 from __future__ import annotations
 
+import gzip
 import hashlib
-import io
 import os
+import shutil
 import stat
-import tarfile
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Optional
 
 import pytest
 
-from tests.veritas_integration.mock_pathoeqa import MockPathoEQA, make_self_signed_cert
+from tests.veritas_integration_local.mock_pathoeqa import MockPathoEQA, make_self_signed_cert
+
+EXECUTOR_SHA = "a" * 40          # GITHUB_SHA == manifest executor.veritas_commit
+TRUTH_BUNDLE_ID = "b" * 64       # hash of the truth manifest, as in the real manifest
+
+# PathoEQA's metrics TSV: header + SNV/INDEL x ALL/PRIMER BED, ratios always present.
+GOOD_TSV = (
+    "Category\tRegion\tTP\tFP\tFN\tPrecision\tRecall\tF1-Score\n"
+    "SNV\tALL\t1\t1\t1\t0.5\t0.5\t0.5\n"
+    "INDEL\tALL\t1\t0\t0\t1.0\t1.0\t1.0\n"
+    "SNV\tPRIMER BED\t1\t0\t1\t1.0\t0.5\t0.6666666666666666\n"
+    "INDEL\tPRIMER BED\t0\t0\t0\t0.0\t0.0\t0.0\n"
+)
+# What Veritas wrote before the fix: PRIMER BED rows carry counts but no ratios.
+LEGACY_TSV = (
+    "Category\tRegion\tTP\tFP\tFN\tPrecision\tRecall\tF1-Score\n"
+    "SNV\tALL\t1\t1\t1\t0.5\t0.5\t0.5\n"
+    "INDEL\tALL\t1\t0\t0\t1.0\t1.0\t1.0\n"
+    "SNV\tPRIMER BED\t1\t0\t1\t\t\t\n"
+    "INDEL\tPRIMER BED\t0\t0\t0\t\t\t\n"
+)
 
 # ------------------------------------------------------------------ artefacts
 
@@ -35,26 +56,19 @@ def sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def make_sdf_tarball() -> bytes:
-    """A minimal, well-formed RTG SDF: one directory holding a couple of files."""
-    buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
-        for name, payload in (
-            ("sdf/mainIndex", b"RTG-SDF-mock\n"),
-            ("sdf/seqdata0", b"ACGT" * 64),
-        ):
-            info = tarfile.TarInfo(name)
-            info.size = len(payload)
-            tar.addfile(info, io.BytesIO(payload))
-    return buf.getvalue()
+_VCF = (
+    "##fileformat=VCFv4.2\n##contig=<ID=chrM,length=500>\n"
+    "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\n"
+    "chrM\t300\t.\tA\tG\t.\tPASS\t.\tGT\t1/1\n"
+    "chrM\t100\t.\tC\tT\t.\tPASS\t.\tGT\t1/1\n"
+)
 
-
+# The four originals PathoEQA ships. TBI and SDF are NOT in the manifest any more.
 ARTEFACT_BYTES = {
     "reference.fa": b">chrM\n" + b"ACGTACGTAC\n" * 50,
-    "truth.vcf.gz": b"\x1f\x8b\x08\x00mock-truth-vcf-payload",
-    "truth.vcf.gz.tbi": b"mock-tabix-index",
-    "query.vcf.gz": b"\x1f\x8b\x08\x00mock-query-vcf-payload",
-    "rtg_sdf.tar.gz": make_sdf_tarball(),
+    "truth.vcf.gz": gzip.compress(_VCF.encode(), mtime=0),
+    "query.vcf.gz": gzip.compress(_VCF.encode(), mtime=0),
+    "primers.bed": b"chrM\t0\t100\n",
 }
 
 
@@ -77,24 +91,35 @@ def server(tls_cert, monkeypatch):
         yield srv
 
 
+def _script(path: Path, body: str) -> None:
+    path.write_text(body)
+    path.chmod(path.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+
+
 @pytest.fixture
 def fake_veritas(tmp_path, monkeypatch):
     """
-    Put a scriptable `veritas` on PATH.
+    Put scriptable `veritas`, `rtg` and `bcftools` on PATH.
 
-    Behaviour is driven by VERITAS_FAKE_MODE:
-        ok          - writes metrics.tsv, exits 0            (default)
-        no_metrics  - exits 0 but writes nothing             -> METRICS_MISSING
-        crash       - exits 3                                -> VERITAS_CRASHED
-        slow        - sleeps ~0.8s, then writes metrics.tsv    (budget tests)
-        hang        - sleeps far past any timeout            -> processing_timeout
+    `veritas` is driven by VERITAS_FAKE_MODE:
+        ok          - writes a contract-valid metrics.tsv, exits 0   (default)
+        legacy_tsv  - writes the old TSV (empty PRIMER BED ratios)   -> PathoEQA 422
+        no_metrics  - exits 0 but writes nothing                     -> METRICS_MISSING
+        crash       - exits 3                                        -> VERITAS_CRASHED
+        slow        - sleeps ~0.8s, then writes a valid metrics.tsv  (budget tests)
+        hang        - sleeps far past any timeout                    -> processing_timeout
+
+    `rtg format -o DIR FASTA` creates DIR/mainIndex (and refuses an existing DIR, like rtg).
+    `bcftools sort|index` copy a gzip input and touch the .tbi; non-gzip input fails.
     """
     bindir = tmp_path / "bin"
     bindir.mkdir()
-    script = bindir / "veritas"
-    script.write_text(
-        """#!/usr/bin/env bash
+    (bindir / "good.tsv").write_text(GOOD_TSV)
+    (bindir / "legacy.tsv").write_text(LEGACY_TSV)
+
+    _script(bindir / "veritas", """#!/usr/bin/env bash
 set -u
+here="$(dirname "$0")"
 if [ "${1:-}" = "--version" ]; then echo "veritas 0.0.0-test"; exit 0; fi
 mode="${VERITAS_FAKE_MODE:-ok}"
 out=""
@@ -104,22 +129,47 @@ done
 case "$mode" in
   crash) echo "boom" >&2; exit 3;;
   hang) sleep 600; exit 0;;
-  slow) sleep 0.8; mkdir -p "$out"; printf 'metric\\tvalue\\nrecall\\t0.99\\n' > "$out/metrics.tsv"; exit 0;;
+  slow) sleep 0.8; mkdir -p "$out"; cp "$here/good.tsv" "$out/metrics.tsv"; exit 0;;
   no_metrics) exit 0;;
-  *) mkdir -p "$out"; printf 'metric\\tvalue\\nrecall\\t0.99\\n' > "$out/metrics.tsv"; exit 0;;
+  legacy_tsv) mkdir -p "$out"; cp "$here/legacy.tsv" "$out/metrics.tsv"; exit 0;;
+  *) mkdir -p "$out"; cp "$here/good.tsv" "$out/metrics.tsv"; exit 0;;
 esac
-"""
-    )
-    script.chmod(script.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+""")
+    _script(bindir / "rtg", """#!/usr/bin/env bash
+[ "${1:-}" = "format" ] || exit 2
+out="$3"
+[ -e "$out" ] && { echo "Error: directory exists" >&2; exit 1; }
+mkdir -p "$out" && echo mock > "$out/mainIndex"
+""")
+    _script(bindir / "bcftools", """#!/usr/bin/env bash
+cmd="${1:-}"; shift
+case "$cmd" in
+  sort)
+    out=""; in=""
+    while [ $# -gt 0 ]; do
+      case "$1" in -o) out="$2"; shift 2;; -O*) shift;; *) in="$1"; shift;; esac
+    done
+    head -c2 "$in" | od -An -tx1 | grep -q '1f 8b' || { echo "[E::hts_open] not a gzip VCF" >&2; exit 1; }
+    cp "$in" "$out";;
+  index) for last; do :; done; : > "$last.tbi";;
+  *) exit 2;;
+esac
+""")
     monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ['PATH']}")
     monkeypatch.setenv("VERITAS_FAKE_MODE", "ok")
-    return script
+    return bindir / "veritas"
 
 
 @pytest.fixture(autouse=True)
 def fast_retries(monkeypatch):
-    """Keep the retry semantics, drop the wall-clock cost."""
+    """Keep the retry semantics, drop the wall-clock cost; pin the workflow SHA."""
     monkeypatch.setenv("VERITAS_RETRY_BASE_DELAY", "0.01")
+    monkeypatch.setenv("GITHUB_SHA", EXECUTOR_SHA)
+    # The runner refuses to start below a 50 GiB free-space estimate; don't let the
+    # developer's disk decide whether the suite passes.
+    monkeypatch.setattr(
+        shutil, "disk_usage", lambda _path: SimpleNamespace(total=500 * 2**30, used=0, free=500 * 2**30)
+    )
 
 
 # ------------------------------------------------------------- manifest builder
@@ -128,8 +178,8 @@ def fast_retries(monkeypatch):
 @pytest.fixture
 def manifest_factory(server):
     """
-    Build a manifest whose URLs point at the mock artefact storage and whose
-    checksums are the real SHA-256 of the bytes that will be served.
+    Build a schema-2.0 manifest whose URLs point at the mock artefact storage and
+    whose checksums are the real SHA-256 of the bytes that will be served.
     """
 
     def _file(role: str, name: str, *, sha: Optional[str] = None, size: Optional[int] = None):
@@ -147,16 +197,15 @@ def manifest_factory(server):
             "sample_order": order,
             "query_type": "vcf",
             "truth_bundle": {
-                "id": "tb-001",
-                "version": "1.0.0",
+                "id": TRUTH_BUNDLE_ID,
+                "version": "1",
                 "files": [
-                    _file("reference_fasta", "reference.fa"),
                     _file("truth_vcf", "truth.vcf.gz"),
-                    _file("truth_tbi", "truth.vcf.gz.tbi"),
-                    _file("rtg_sdf", "rtg_sdf.tar.gz"),
+                    _file("reference_fasta", "reference.fa"),
                 ],
             },
             "query_input": _file("query_vcf", "query.vcf.gz"),
+            "region_annotations": {"primer_bed": _file("primer_bed", "primers.bed")},
         }
         sample.update(overrides)
         return sample
@@ -169,15 +218,15 @@ def manifest_factory(server):
         **overrides,
     ) -> dict:
         manifest = {
-            "schema_version": "1.0",
+            "schema_version": "2.0",
             "attempt_id": attempt_id,
             "execution_id": "exec-0001",
             "operational_deadline_seconds": operational_deadline_seconds,
             "hard_timeout_seconds": 5400,
             "executor": {
-                "veritas_commit": "a" * 40,
+                "veritas_commit": EXECUTOR_SHA,
                 "environment_digest": "sha256:" + "b" * 64,
-                "parser_version": "1.0",
+                "parser_version": "pathoeqa-tsv-v1-decimal28",
             },
             "samples": [_sample(f"sr-{i + 1:03d}", i + 1) for i in range(samples)],
         }
